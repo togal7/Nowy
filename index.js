@@ -1,44 +1,78 @@
 const { Telegraf, Markup } = require('telegraf');
 const axios = require('axios');
 
-// Klucze do MEXC – NIE udostępniaj nikomu! Wpisz swoje tutaj:
+// Twój token Telegram
 const TOKEN = '8067663229:AAEb3__Kn-UhDopgTHkGCdvdfwaZXRzHmig';
 
-// Mapowanie klawiatury na wartości z API MEXC FUTURES:
-const futuresIntervalMap = {
-  '1 min': 'Min1',
-  '5 min': 'Min5',
-  '15 min': 'Min15',
-  '30 min': 'Min30',
-  '1 godz': 'Min60',
-  '4 godz': 'Hour4',
-  '1 dzień': 'Day1',
-  '1 tydzień': 'Week1',
-  '1 miesiąc': 'Month1'
-};
+// Mapowanie: przyciski na telegramie → API giełdy
+const exchangeKeyboard = [
+  [{ text: 'MEXC Futures', callback_data: 'mexc' }, { text: 'Bybit Perpetual', callback_data: 'bybit' }]
+];
 
+// Interwały (Telegram → API MEXC/Bybit)
+const mexcIntervalMap = {
+  '1 min': 'Min1',    '5 min': 'Min5',  '15 min': 'Min15',
+  '30 min': 'Min30',  '1 godz': 'Min60','4 godz': 'Hour4',
+  '1 dzień': 'Day1',  '1 tydzień': 'Week1','1 miesiąc': 'Month1'
+};
+const bybitIntervalMap = {
+  '1 min': '1',     '5 min': '5',   '15 min': '15',
+  '30 min': '30',   '1 godz': '60', '4 godz': '240',
+  '1 dzień': 'D',   '1 tydzień': 'W','1 miesiąc': 'M'
+};
 const intervalKeyboard = [
   ['1 min', '5 min', '15 min'],
   ['30 min', '1 godz', '4 godz'],
   ['1 dzień', '1 tydzień', '1 miesiąc']
 ];
 
-// Dostępne progi RSI do wyboru
+// Progi RSI do wyboru
 const rsiThresholds = [
   [{ text: '99/1', callback_data: 'rsi_99_1' }, { text: '95/5', callback_data: 'rsi_95_5' }],
   [{ text: '90/10', callback_data: 'rsi_90_10' }, { text: '80/20', callback_data: 'rsi_80_20' }],
   [{ text: '70/30', callback_data: 'rsi_70_30' }]
 ];
 
-// ======== FUNKCJE POBIERAJĄCE DANE Z MEXC FUTURES ========
+// ---------- FUNKCJE API -------------
 
-// Lista tylko USDT-M (perpetual) futures:
-async function fetchFuturesSymbols() {
+// MEXC SYMBOLS
+async function fetchMexcFuturesSymbols() {
   const res = await axios.get('https://contract.mexc.com/api/v1/contract/detail');
   return res.data.data.filter(s => s.quoteCoin === 'USDT').map(s => s.symbol);
 }
 
-// Liczenie RSI
+// BYBIT SYMBOLS
+async function fetchBybitSymbols() {
+  const url = 'https://api.bybit.com/v5/market/instruments-info?category=linear';
+  const res = await axios.get(url);
+  return res.data.result.list
+    .filter(x => x.status === 'Trading' && x.symbol.endsWith('USDT'))
+    .map(x => x.symbol);
+}
+
+// KLINE MEXC
+async function fetchMexcFuturesRSI(symbol, interval = 'Min60') {
+  try {
+    const url = `https://contract.mexc.com/api/v1/contract/kline/${symbol}?interval=${interval}&limit=15`;
+    const { data } = await axios.get(url);
+    if (!data.data || data.data.length < 15) return null;
+    const closes = data.data.map(k => parseFloat(k[4]));
+    return calculateRSI(closes);
+  } catch { return null; }
+}
+
+// KLINE BYBIT
+async function fetchBybitRSI(symbol, interval = '60') {
+  try {
+    const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${interval}&limit=15`;
+    const res = await axios.get(url);
+    if (!res.data.result || !res.data.result.list || res.data.result.list.length < 15) return null;
+    const closes = res.data.result.list.map(k => parseFloat(k[4]));
+    return calculateRSI(closes);
+  } catch { return null; }
+}
+
+// RSI algorytm
 function calculateRSI(closes) {
   if (closes.length < 15) return null;
   let gains = 0, losses = 0;
@@ -53,89 +87,99 @@ function calculateRSI(closes) {
   return 100 - (100 / (1 + rs));
 }
 
-// Pobierz świece dla futures
-async function fetchFuturesRSI(symbol, interval = 'Min60') {
-  try {
-    const url = `https://contract.mexc.com/api/v1/contract/kline/${symbol}?interval=${interval}&limit=15`;
-    const { data } = await axios.get(url);
-    if (!data.data || data.data.length < 15) return null;
-    const closes = data.data.map(k => parseFloat(k[4]));
-    return calculateRSI(closes);
-  } catch (err) {
-    return null;
+// ----- Wspólna funkcja wykrywająca
+async function scanRSI(exchange = 'mexc', interval, thresholds, chatId) {
+  let symbols, rsiGetter, intervalLabel;
+  if (exchange === 'bybit') {
+    symbols = await fetchBybitSymbols();
+    rsiGetter = (symbol) => fetchBybitRSI(symbol, interval);
+    intervalLabel = Object.keys(bybitIntervalMap).find(key => bybitIntervalMap[key] === interval) || interval;
+  } else {
+    symbols = await fetchMexcFuturesSymbols();
+    rsiGetter = (symbol) => fetchMexcFuturesRSI(symbol, interval);
+    intervalLabel = Object.keys(mexcIntervalMap).find(key => mexcIntervalMap[key] === interval) || interval;
   }
-}
-
-// Główna funkcja do skanowania RSI na futures z konfigurowalnymi progami
-async function scanFuturesRSI(interval = 'Min60', thresholds = { overbought: 70, oversold: 30 }, chatId) {
-  const symbols = await fetchFuturesSymbols();
   let oversold = [], overbought = [];
   for (const sym of symbols) {
-    const rsi = await fetchFuturesRSI(sym, interval);
+    const rsi = await rsiGetter(sym);
     if (rsi === null) continue;
     if (rsi < thresholds.oversold) oversold.push({ sym, rsi });
     if (rsi > thresholds.overbought) overbought.push({ sym, rsi });
   }
-  let msg = `📊 _Skan RSI Futures (${interval})_\nUstawienia: Wyprzedane <${thresholds.oversold}, wykupione >${thresholds.overbought}\n\n`;
+  let msg = `📊 _Skan RSI [${exchange.toUpperCase()}] (${intervalLabel})_\nUstawienia: Wyprzedane <${thresholds.oversold}, wykupione >${thresholds.overbought}\n\n`;
   if (oversold.length) {
     msg += `🟢 Wyprzedane (RSI<${thresholds.oversold}):\n`;
-    oversold.slice(0,10).forEach(x => msg+=`• ${x.sym}: ${x.rsi.toFixed(2)}\n`);
+    oversold.slice(0, 10).forEach(x => msg += `• ${x.sym}: ${x.rsi.toFixed(2)}\n`);
   }
   if (overbought.length) {
     msg += `🔴 Wykupione (RSI>${thresholds.overbought}):\n`;
-    overbought.slice(0,10).forEach(x => msg+=`• ${x.sym}: ${x.rsi.toFixed(2)}\n`);
+    overbought.slice(0, 10).forEach(x => msg += `• ${x.sym}: ${x.rsi.toFixed(2)}\n`);
   }
-  if (!oversold.length && !overbought.length) msg += "Brak sygnałów!";
+  if (!oversold.length && !overbought.length) msg += 'Brak sygnałów!';
   await bot.telegram.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
 }
 
-// ============= INTERFEJS TELEGRAM ===============
+// ------- INTERFEJS TELEGRAM ---------
 
 const bot = new Telegraf(TOKEN);
+let userConfig = {}; // chat.id: { exchange, interval, overbought, oversold }
 
-// Przechowuje wybory użytkownika (proste cache, na prostą wersję)
-let userConfig = {};
-
-/* Etap 1: start – wybierz interwał z keyboarda */
 bot.start(ctx => {
+  userConfig[ctx.chat.id] = {};
   ctx.reply(
-    "Witaj! Wybierz interwał RSI do skanowania na rynku futures.",
-    Markup.keyboard(intervalKeyboard).oneTime().resize()
-  );
-  ctx.reply(
-    "Wybierz próg RSI:",
-    Markup.inlineKeyboard(rsiThresholds)
+    'Witaj!\nWybierz giełdę do skanowania RSI:',
+    Markup.inlineKeyboard(exchangeKeyboard)
   );
 });
 
-/* Etap 2: wybór interwału przez keyboard */
-bot.hears(Object.keys(futuresIntervalMap), ctx => {
+bot.action(['mexc', 'bybit'], ctx => {
+  const exchange = ctx.match[0];
+  userConfig[ctx.chat.id] = { exchange };
+  ctx.reply(
+    `Wybrano giełdę: ${exchange.toUpperCase()}.\nTeraz wybierz interwał RSI:`,
+    Markup.keyboard(intervalKeyboard).oneTime().resize()
+  );
+  ctx.answerCbQuery();
+  ctx.reply('Wybierz próg RSI:', Markup.inlineKeyboard(rsiThresholds));
+});
+
+bot.hears(Object.keys(mexcIntervalMap), ctx => {
+  // Ustal który exchange, bo interwały się różnią!
+  let interval;
+  if (userConfig[ctx.chat.id] && userConfig[ctx.chat.id].exchange === 'bybit')
+    interval = bybitIntervalMap[ctx.message.text] || '60';
+  else
+    interval = mexcIntervalMap[ctx.message.text] || 'Min60';
   userConfig[ctx.chat.id] = userConfig[ctx.chat.id] || {};
-  userConfig[ctx.chat.id].interval = futuresIntervalMap[ctx.message.text] || 'Min60';
+  userConfig[ctx.chat.id].interval = interval;
   ctx.reply('Wybrano interwał: ' + ctx.message.text + '. Teraz wybierz próg RSI:', Markup.inlineKeyboard(rsiThresholds));
 });
 
-/* Etap 3: wybór progu przez inline keyboard */
 bot.action(/rsi_(\d+)_(\d+)/, async ctx => {
   const over = parseInt(ctx.match[1]);
   const under = parseInt(ctx.match[2]);
   userConfig[ctx.chat.id] = userConfig[ctx.chat.id] || {};
   userConfig[ctx.chat.id].overbought = over;
   userConfig[ctx.chat.id].oversold = under;
-  const interval = userConfig[ctx.chat.id].interval || 'Min60';
-  await ctx.reply(`Skanuję Futures RSI dla progu >${over} / <${under}, interwał: ${interval}...`);
-  await scanFuturesRSI(interval, { overbought: over, oversold: under }, ctx.chat.id);
+  const exchange = userConfig[ctx.chat.id].exchange || 'mexc';
+  const interval = userConfig[ctx.chat.id].interval || (exchange === 'bybit' ? '60' : 'Min60');
+  await ctx.reply(`Skanuję ${exchange.toUpperCase()} RSI dla progu >${over} / <${under}, interwał: ${interval}...`);
+  await scanRSI(exchange, interval, { overbought: over, oversold: under }, ctx.chat.id);
 });
 
-/* Zaawansowana komenda tekstowa! /futures [interwał] [górny próg] [dolny próg] */
-bot.command('futures', ctx => {
-  // np. /futures Min1 95 5
-  const p = ctx.message.text.split(' ');
-  const interval = p[1] || 'Min60';
-  const over = parseInt(p[2]) || 70;
-  const under = parseInt(p[3]) || 30;
-  ctx.reply(`Skanuję Futures RSI >${over} / <${under} (${interval})...`);
-  scanFuturesRSI(interval, { overbought: over, oversold: under }, ctx.chat.id);
+// Komenda tekstowa uniwersalna:
+/*
+  /scan giełda interwał over under
+  /scan bybit 60 99 1
+  /scan mexc Min5 80 20
+*/
+bot.command('scan', ctx => {
+  const [cmd, exch, interval, over, under] = ctx.message.text.split(' ');
+  const exchange = exch || 'mexc';
+  const ov = parseInt(over) || 70;
+  const un = parseInt(under) || 30;
+  ctx.reply(`Skanuję ${exchange.toUpperCase()} RSI >${ov} / <${un} (${interval})...`);
+  scanRSI(exchange, interval, { overbought: ov, oversold: un }, ctx.chat.id);
 });
 
 bot.launch();
