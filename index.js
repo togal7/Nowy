@@ -1,46 +1,44 @@
 const { Telegraf, Markup } = require('telegraf');
 const axios = require('axios');
 
-// Klucze do MEXC
-const MEXC_API_KEY = 'mx0vgl8IDqxNwtPobJ';
-const MEXC_API_SECRET = '20004e6ab5ba431d9f80850f54feff4d';
+// Klucze do MEXC – NIE udostępniaj nikomu! Wpisz swoje tutaj:
 const TOKEN = '8067663229:AAEb3__Kn-UhDopgTHkGCdvdfwaZXRzHmig';
-const bot = new Telegraf(TOKEN);
 
-// Mapowanie krótkich nazw do endpointów i interwałów
-const intervalMap = {
-  '1 min': '1m',
-  '5 min': '5m',
-  '15 min': '15m',
-  '30 min': '30m',
-  '1 godz': '1h',
-  '4 godz': '4h',
-  '1 dzień': '1d',
-  '1 tydzień': '1w',
-  '1 miesiąc': '1M'
+// Mapowanie klawiatury na wartości z API MEXC FUTURES:
+const futuresIntervalMap = {
+  '1 min': 'Min1',
+  '5 min': 'Min5',
+  '15 min': 'Min15',
+  '30 min': 'Min30',
+  '1 godz': 'Min60',
+  '4 godz': 'Hour4',
+  '1 dzień': 'Day1',
+  '1 tydzień': 'Week1',
+  '1 miesiąc': 'Month1'
 };
 
-// Dostępne progi RSI do wyboru
-const rsiThresholds = [
-  [{ text: '90/10', callback_data: 'rsi_90_10' }, { text: '80/20', callback_data: 'rsi_80_20' }],
-  [{ text: '70/30', callback_data: 'rsi_70_30' }], // klasyczny
-];
-
-// Interwały jako keyboard
 const intervalKeyboard = [
   ['1 min', '5 min', '15 min'],
   ['30 min', '1 godz', '4 godz'],
   ['1 dzień', '1 tydzień', '1 miesiąc']
 ];
 
-// Pobierz symbole futures USDT
+// Dostępne progi RSI do wyboru
+const rsiThresholds = [
+  [{ text: '99/1', callback_data: 'rsi_99_1' }, { text: '95/5', callback_data: 'rsi_95_5' }],
+  [{ text: '90/10', callback_data: 'rsi_90_10' }, { text: '80/20', callback_data: 'rsi_80_20' }],
+  [{ text: '70/30', callback_data: 'rsi_70_30' }]
+];
+
+// ======== FUNKCJE POBIERAJĄCE DANE Z MEXC FUTURES ========
+
+// Lista tylko USDT-M (perpetual) futures:
 async function fetchFuturesSymbols() {
   const res = await axios.get('https://contract.mexc.com/api/v1/contract/detail');
-  // Bierzemy tylko USDT-M
   return res.data.data.filter(s => s.quoteCoin === 'USDT').map(s => s.symbol);
 }
 
-// RSI z klucza
+// Liczenie RSI
 function calculateRSI(closes) {
   if (closes.length < 15) return null;
   let gains = 0, losses = 0;
@@ -55,17 +53,21 @@ function calculateRSI(closes) {
   return 100 - (100 / (1 + rs));
 }
 
-// Pobiera świece (candlestick) z MEXC Futures
-async function fetchFuturesRSI(symbol, interval = '1h') {
-  const url = `https://contract.mexc.com/api/v1/contract/kline/${symbol}?interval=${interval}&limit=15`;
-  const { data } = await axios.get(url);
-  if (!data.data || data.data.length < 15) return null;
-  const closes = data.data.map(k => parseFloat(k[4])); // [open,high,low,close,volume,timestamp]
-  return calculateRSI(closes);
+// Pobierz świece dla futures
+async function fetchFuturesRSI(symbol, interval = 'Min60') {
+  try {
+    const url = `https://contract.mexc.com/api/v1/contract/kline/${symbol}?interval=${interval}&limit=15`;
+    const { data } = await axios.get(url);
+    if (!data.data || data.data.length < 15) return null;
+    const closes = data.data.map(k => parseFloat(k[4]));
+    return calculateRSI(closes);
+  } catch (err) {
+    return null;
+  }
 }
 
-// Główna funkcja skanowania z możliwością wyboru progu
-async function scanFuturesRSI(interval = '1h', thresholds = { overbought: 70, oversold: 30 }, chatId) {
+// Główna funkcja do skanowania RSI na futures z konfigurowalnymi progami
+async function scanFuturesRSI(interval = 'Min60', thresholds = { overbought: 70, oversold: 30 }, chatId) {
   const symbols = await fetchFuturesSymbols();
   let oversold = [], overbought = [];
   for (const sym of symbols) {
@@ -87,42 +89,49 @@ async function scanFuturesRSI(interval = '1h', thresholds = { overbought: 70, ov
   await bot.telegram.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
 }
 
-// Rozpocznij – wybierz interwał i próg!
+// ============= INTERFEJS TELEGRAM ===============
+
+const bot = new Telegraf(TOKEN);
+
+// Przechowuje wybory użytkownika (proste cache, na prostą wersję)
+let userConfig = {};
+
+/* Etap 1: start – wybierz interwał z keyboarda */
 bot.start(ctx => {
   ctx.reply(
-    "Witaj! Wybierz interwał oraz próg RSI:",
+    "Witaj! Wybierz interwał RSI do skanowania na rynku futures.",
     Markup.keyboard(intervalKeyboard).oneTime().resize()
   );
   ctx.reply(
-    "Wybierz układ progów RSI:",
+    "Wybierz próg RSI:",
     Markup.inlineKeyboard(rsiThresholds)
   );
 });
 
-// Przechowuj ostatnią konfigurację użytkownika (pobierz do lepszej wersji – tutaj prosto)
-let userConfig = {};
-bot.hears(Object.keys(intervalMap), ctx => {
+/* Etap 2: wybór interwału przez keyboard */
+bot.hears(Object.keys(futuresIntervalMap), ctx => {
   userConfig[ctx.chat.id] = userConfig[ctx.chat.id] || {};
-  userConfig[ctx.chat.id].interval = intervalMap[ctx.message.text] || '1h';
+  userConfig[ctx.chat.id].interval = futuresIntervalMap[ctx.message.text] || 'Min60';
   ctx.reply('Wybrano interwał: ' + ctx.message.text + '. Teraz wybierz próg RSI:', Markup.inlineKeyboard(rsiThresholds));
 });
 
-bot.action(/rsi_(\d+)_(\d+)/, ctx => {
+/* Etap 3: wybór progu przez inline keyboard */
+bot.action(/rsi_(\d+)_(\d+)/, async ctx => {
   const over = parseInt(ctx.match[1]);
   const under = parseInt(ctx.match[2]);
   userConfig[ctx.chat.id] = userConfig[ctx.chat.id] || {};
   userConfig[ctx.chat.id].overbought = over;
   userConfig[ctx.chat.id].oversold = under;
-  const interval = userConfig[ctx.chat.id].interval || '1h';
-  ctx.reply(`Skanuję Futures RSI dla progu >${over} / <${under}, interwał: ${interval}...`);
-  scanFuturesRSI(interval, { overbought: over, oversold: under }, ctx.chat.id);
+  const interval = userConfig[ctx.chat.id].interval || 'Min60';
+  await ctx.reply(`Skanuję Futures RSI dla progu >${over} / <${under}, interwał: ${interval}...`);
+  await scanFuturesRSI(interval, { overbought: over, oversold: under }, ctx.chat.id);
 });
 
-// Komenda tekstowa – zaawansowani
+/* Zaawansowana komenda tekstowa! /futures [interwał] [górny próg] [dolny próg] */
 bot.command('futures', ctx => {
-  // /futures 1h 90 10
+  // np. /futures Min1 95 5
   const p = ctx.message.text.split(' ');
-  const interval = (p[1] || '1h');
+  const interval = p[1] || 'Min60';
   const over = parseInt(p[2]) || 70;
   const under = parseInt(p[3]) || 30;
   ctx.reply(`Skanuję Futures RSI >${over} / <${under} (${interval})...`);
