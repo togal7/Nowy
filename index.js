@@ -32,11 +32,9 @@ const bot = new Telegraf(TOKEN);
 
 function checkAccess(ctx) {
   const id = ctx.from.id;
-  // Jeśli nie ma – dodać nowego usera na 7 dni
   if (!userDB[id]) {
     userDB[id] = { start: Date.now(), accessUntil: Date.now() + 7*24*3600*1000, blocked: false };
   }
-  // Nadal admin nie ma ograniczenia
   if (id === ADMIN_ID) return true;
   if (userDB[id].blocked) {
     ctx.reply(`Twój dostęp został zablokowany przez administratora. Skontaktuj się z nim (ID: ${ADMIN_ID}) w celu odblokowania.`);
@@ -92,16 +90,14 @@ function showMenu(ctx) {
   ]));
 }
 
-// UNIVERSAL PRE-CHECK FOR NON-ADMIN FLOWS:
 bot.use((ctx, next) => {
-  // Zawsze blokuj nieautoryzowanych (poza panel admina)
   if (!checkAccess(ctx)) return;
   next();
 });
 
 // WYBÓR GIEŁDY → INTERWAŁ
 bot.action(exchanges.map(e=>e.key), ctx => {
-  userConfig[ctx.chat.id] = { exchange: ctx.match };
+  userConfig[ctx.chat.id] = { exchange: ctx.match[0] };
   ctx.reply('Wybierz interwał:', Markup.keyboard(intervalKeyboard).oneTime().resize());
   ctx.answerCbQuery();
 });
@@ -113,7 +109,7 @@ bot.hears(['1 min','5 min','15 min','30 min','1 godz','4 godz','1 dzień','1 tyd
   ctx.reply('Wybierz próg RSI:', Markup.inlineKeyboard(rsiThresholds));
 });
 
-// WYBÓR PROGU RSI → WYNIKI RSI Z PRZYCISKAMI (obsługuje również "Wszystkie")
+// WYBÓR PROGU RSI → WYNIKI RSI (każda linia to cały przycisk)
 bot.action(/rsi_(\d+)_(\d+)/, async ctx => {
   const chatId = ctx.chat.id;
   userConfig[chatId] = userConfig[chatId] || {};
@@ -139,18 +135,15 @@ bot.action(/rsi_(\d+)_(\d+)/, async ctx => {
     showMenu(ctx);
     return ctx.answerCbQuery();
   }
-  // Lista sygnałów z nazwą giełdy i do każdej pary przycisk 🔍
-  let lines = [];
-  let keyboard = [];
-  wyniki.forEach((syg, idx) => {
-    lines.push(`${syg.type} ${syg.symbol} (${syg.exchange.toUpperCase()}), RSI: ${syg.rsi.toFixed(2)}`);
-    keyboard.push([{ text: '🔍', callback_data: `detail_${syg.symbol}_${syg.exchange}_${intervalLabel}` }]);
-  });
-  ctx.reply(lines.join('\n'), Markup.inlineKeyboard(keyboard));
+  // Każda linia sygnału to cały przycisk
+  let keyboard = wyniki.map(syg => [{
+    text: `${syg.type} ${syg.symbol} (${syg.exchange.toUpperCase()}), RSI: ${syg.rsi.toFixed(2)}`,
+    callback_data: `detail_${syg.symbol}_${syg.exchange}_${intervalLabel}`
+  }]);
+  ctx.reply(`Kliknij wybrany sygnał, aby zobaczyć analizę techniczną:`, Markup.inlineKeyboard(keyboard));
   ctx.answerCbQuery();
 });
 
-// SZCZEGÓŁOWA ANALIZA TECHNICZNA (działa dla każdej giełdy!)
 bot.action(/detail_(.+)_(.+)_(.+)/, async ctx => {
   const [symbol, exchange, intervalLabel] = [ctx.match[1], ctx.match[2], ctx.match[3]];
   ctx.reply(`Analizuję ${symbol} (${exchange}) na interwale ${intervalLabel} ...`);
@@ -245,5 +238,58 @@ async function downloadCloses(exchange, symbol, intervalLabel) {
       if (Array.isArray(resp.data.data) && resp.data.data.length >= 15) {
         return resp.data.data.map(k => parseFloat(k[4]));
       } else if (resp.data.data && Array.isArray(resp.data.data.close) && resp.data.data.close.length >= 15) {
-        return resp.data.data.close
-        
+        return resp.data.data.close.slice(-15).map(Number);
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function calculateRSI(closes) {
+  if (closes.length < 15) return null;
+  let gains = 0, losses = 0;
+  for (let i = 1; i <= 14; i++) {
+    const diff = closes[i] - closes[i-1];
+    if (diff > 0) gains += diff; else losses -= diff;
+  }
+  let avgGain = gains / 14;
+  let avgLoss = losses / 14;
+  if (avgLoss === 0) return 100;
+  const rs = avgGain / avgLoss;
+  return 100 - (100 / (1 + rs));
+}
+
+function detectSupportResistance(closes) {
+  let support = [], resistance = [];
+  for (let i = 2; i < closes.length - 2; i++) {
+    if (closes[i] < closes[i - 1] && closes[i] < closes[i - 2] && closes[i] < closes[i + 1] && closes[i] < closes[i + 2]) {
+      support.push(closes[i]);
+    }
+    if (closes[i] > closes[i - 1] && closes[i] > closes[i - 2] && closes[i] > closes[i + 1] && closes[i] > closes[i + 2]) {
+      resistance.push(closes[i]);
+    }
+  }
+  let signal = null;
+  if (support.length > 0 && closes[closes.length-1] > support[support.length-1]) signal = "LONG/odbicie od wsparcia";
+  if (resistance.length > 0 && closes[closes.length-1] < resistance[resistance.length-1]) signal = "SHORT/przebicie oporu";
+  return { support: support.slice(-3), resistance: resistance.slice(-3), signal };
+}
+
+async function fetchLatestNews(symbol) {
+  try {
+    const resp = await axios.get(`https://newsapi.org/v2/everything`, {
+      params: { q: symbol.replace('USDT',''), pageSize: 3, apiKey: 'demo' }
+    });
+    return resp.data.articles.slice(0, 3).map(news => `${news.title} (${news.source.name})`);
+  } catch {
+    return [`Brak najnowszych newsów lub błąd API.`];
+  }
+}
+
+function generateChartUrl(symbol, closes, levels) {
+  return `https://pl.tradingview.com/chart/?symbol=${symbol.replace('USDT','USDT.P')}`;
+}
+
+bot.launch();
