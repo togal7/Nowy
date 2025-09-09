@@ -34,7 +34,7 @@ const bot = new Telegraf(TOKEN);
 // PANEL ADMINA
 bot.command('admin', ctx => {
   if (ctx.from.id !== ADMIN_ID) return ctx.reply('Brak uprawnień!');
-  ctx.reply('Panel administratora aktywny!\nDostępne komendy:\n/uzytkownicy\n/odblokuj <id>\n/blokuj <id>');
+  ctx.reply('Panel administratora:\n/uzytkownicy\n/odblokuj <id>\n/blokuj <id>');
 });
 bot.command('uzytkownicy', ctx => {
   if (ctx.from.id !== ADMIN_ID) return;
@@ -64,7 +64,7 @@ bot.command('blokuj', ctx => {
 
 // MENU STARTOWE
 bot.start(ctx => {
-  userConfig[ctx.chat.id] = {}; // reset sekwencji
+  userConfig[ctx.chat.id] = {};
   ctx.reply('Wybierz giełdę do skanowania RSI:', Markup.inlineKeyboard(exchangeKeyboard));
 });
 
@@ -110,74 +110,62 @@ async function scanRSI(exchange, intervalLabel, thresholds, chatId) {
   try {
     if (exchange === 'bybit') {
       const s = await axios.get('https://api.bybit.com/v5/market/instruments-info?category=linear');
-      symbols = s.data.result.list.filter(x => x.status === 'Trading' && x.symbol.endsWith('USDT')).map(x => x.symbol);
-      for (const chunk of chunkArray(symbols, 8)) {
-        const results = await Promise.all(chunk.map(async (sym) => {
-          try {
+      symbols = s.data.result.list.filter(x =>
+        x.status === 'Trading' && x.symbol.endsWith('USDT'))
+        .map(x => x.symbol);
+    } else if (exchange === 'binance') {
+      const s = await axios.get('https://fapi.binance.com/fapi/v1/exchangeInfo');
+      symbols = s.data.symbols.filter(x =>
+        x.status === 'TRADING' && x.symbol.endsWith('USDT'))
+        .map(x => x.symbol);
+    } else if (exchange === 'mexc') {
+      const s = await axios.get('https://contract.mexc.com/api/v1/contract/detail');
+      symbols = s.data.data
+        .filter(x => x.quoteCoin === 'USDT')
+        .map(x => x.symbol)
+        .filter(sym =>
+          !sym.includes('STOCK') &&
+          !sym.includes('ETF') &&
+          !sym.includes('INDEX') &&
+          !sym.includes('LIVE') &&
+          sym.endsWith('USDT') &&
+          sym === sym.toUpperCase()
+        );
+    }
+    for (const chunk of chunkArray(symbols, 8)) {
+      const results = await Promise.all(chunk.map(async (sym) => {
+        try {
+          let closes = null;
+          if (exchange === 'bybit') {
             const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${sym}&interval=${bybitIntervalMap[intervalLabel]}&limit=15`;
             const resp = await axios.get(url);
             if (!resp.data.result || !resp.data.result.list || resp.data.result.list.length < 15) return null;
-            const closes = resp.data.result.list.map(k => parseFloat(k[4]));
-            const rsi = calculateRSI(closes);
-            if (rsi === null) return null;
-            if (rsi < thresholds.oversold)
-              return `🟢 Wyprzedane: ${sym}: RSI ${rsi.toFixed(2)}\n`;
-            if (rsi > thresholds.overbought)
-              return `🔴 Wykupione: ${sym}: RSI ${rsi.toFixed(2)}\n`;
-            return null;
-          } catch { return null; }
-        }));
-        msg += results.filter(x => x).join('');
-      }
-    } else if (exchange === 'binance') {
-      const s = await axios.get('https://fapi.binance.com/fapi/v1/exchangeInfo');
-      symbols = s.data.symbols.filter(x => x.status === 'TRADING' && x.symbol.endsWith('USDT')).map(x => x.symbol);
-      for (const chunk of chunkArray(symbols, 8)) {
-        const results = await Promise.all(chunk.map(async (sym) => {
-          try {
+            closes = resp.data.result.list.map(k => parseFloat(k[4]));
+          } else if (exchange === 'binance') {
             const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${sym}&interval=${binanceIntervalMap[intervalLabel]}&limit=15`;
             const resp = await axios.get(url);
             if (!Array.isArray(resp.data) || resp.data.length < 15) return null;
-            const closes = resp.data.map(k => parseFloat(k[4]));
-            const rsi = calculateRSI(closes);
-            if (rsi === null) return null;
-            if (rsi < thresholds.oversold)
-              return `🟢 Wyprzedane: ${sym}: RSI ${rsi.toFixed(2)}\n`;
-            if (rsi > thresholds.overbought)
-              return `🔴 Wykupione: ${sym}: RSI ${rsi.toFixed(2)}\n`;
-            return null;
-          } catch { return null; }
-        }));
-        msg += results.filter(x => x).join('');
-      }
-    } else if (exchange === 'mexc') {
-      const s = await axios.get('https://contract.mexc.com/api/v1/contract/detail');
-      symbols = s.data.data.filter(x => x.quoteCoin === 'USDT').map(x => x.symbol);
-      for (const chunk of chunkArray(symbols, 8)) {
-        const results = await Promise.all(chunk.map(async (sym) => {
-          try {
+            closes = resp.data.map(k => parseFloat(k[4]));
+          } else if (exchange === 'mexc') {
             const url = `https://contract.mexc.com/api/v1/contract/kline/${sym}?interval=${mexcIntervalMap[intervalLabel]}&limit=15`;
             const resp = await axios.get(url);
-            let closes = null;
             if (Array.isArray(resp.data.data) && resp.data.data.length >= 15) {
               closes = resp.data.data.map(k => parseFloat(k[4]));
             } else if (resp.data.data && Array.isArray(resp.data.data.close) && resp.data.data.close.length >= 15) {
               closes = resp.data.data.close.slice(-15).map(Number);
             }
-            if (!closes) return null;
-            const rsi = calculateRSI(closes);
-            if (rsi === null) return null;
-            if (rsi < thresholds.oversold)
-              return `🟢 Wyprzedane: ${sym}: RSI ${rsi.toFixed(2)}\n`;
-            if (rsi > thresholds.overbought)
-              return `🔴 Wykupione: ${sym}: RSI ${rsi.toFixed(2)}\n`;
-            return null;
-          } catch { return null; }
-        }));
-        msg += results.filter(x => x).join('');
-      }
-    } else {
-      msg += 'Obsługa tej giełdy została wyłączona.';
+          }
+          if (!closes) return null;
+          const rsi = calculateRSI(closes);
+          if (rsi === null) return null;
+          if (rsi < thresholds.oversold)
+            return `🟢 Wyprzedane: ${sym}: RSI ${rsi.toFixed(2)}\n`;
+          if (rsi > thresholds.overbought)
+            return `🔴 Wykupione: ${sym}: RSI ${rsi.toFixed(2)}\n`;
+          return null;
+        } catch { return null; }
+      }));
+      msg += results.filter(x => x).join('');
     }
   } catch (e) {
     msg += '\nBłąd pobierania danych!\n' + (e.message||'');
