@@ -124,8 +124,10 @@ async function scanRSI(exchange, intervalLabel, thresholds, chatId) {
         .filter(x =>
           x.quoteCoin === 'USDT' &&
           (
-            x.state === 'ENABLED' || x.state === '1' ||
-            x.status === 'listed' || x.status === 'TRADING'
+            !x.state || x.state === 'ENABLED' || x.state === '1' || x.state === '2'
+          ) &&
+          (
+            !x.status || x.status === 'listed' || x.status === 'TRADING' || x.status === 'open'
           )
         )
         .map(x => x.symbol)
