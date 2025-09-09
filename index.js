@@ -7,7 +7,8 @@ const ADMIN_ID = 5157140630;
 const exchanges = [
   { key: 'bybit', label: 'Bybit Perpetual' },
   { key: 'binance', label: 'Binance USDT-M' },
-  { key: 'mexc', label: 'MEXC Futures' }
+  { key: 'mexc', label: 'MEXC Futures' },
+  { key: 'all', label: 'Wszystkie' }
 ];
 
 const bybitIntervalMap = { '1 min': '1', '5 min': '5', '15 min': '15','30 min': '30','1 godz': '60','4 godz': '240','1 dzień': 'D','1 tydzień': 'W','1 miesiąc': 'M' };
@@ -84,7 +85,7 @@ bot.hears(['1 min','5 min','15 min','30 min','1 godz','4 godz','1 dzień','1 tyd
   ctx.reply('Wybierz próg RSI:', Markup.inlineKeyboard(rsiThresholds));
 });
 
-// WYBÓR PROGU RSI → WYNIKI RSI Z PRZYCISKAMI
+// WYBÓR PROGU RSI → WYNIKI RSI Z PRZYCISKAMI (obsługuje również "Wszystkie")
 bot.action(/rsi_(\d+)_(\d+)/, async ctx => {
   const chatId = ctx.chat.id;
   if (!userConfig[chatId]) userConfig[chatId] = {};
@@ -93,43 +94,48 @@ bot.action(/rsi_(\d+)_(\d+)/, async ctx => {
   const exchange = userConfig[chatId].exchange || 'mexc';
   const intervalLabel = userConfig[chatId].interval || '1 godz';
   ctx.reply(`Skanuję RSI (${exchange.toUpperCase()}) >${userConfig[chatId].overbought} / <${userConfig[chatId].oversold} (${intervalLabel})...`);
-  // Wyszukaj sygnały RSI
-  const wyniki = await scanRSISignals(exchange, intervalLabel, { overbought: userConfig[chatId].overbought, oversold: userConfig[chatId].oversold });
+  // Sygnały RSI z wielu giełd!
+  let wyniki = [];
+  if (exchange === 'all') {
+    for (const giełda of exchanges.filter(e => e.key !== 'all')) {
+      let results = await scanRSISignals(giełda.key, intervalLabel, { overbought: userConfig[chatId].overbought, oversold: userConfig[chatId].oversold });
+      results.forEach(r => { r.exchange = giełda.key; });
+      wyniki = wyniki.concat(results);
+    }
+  } else {
+    let results = await scanRSISignals(exchange, intervalLabel, { overbought: userConfig[chatId].overbought, oversold: userConfig[chatId].oversold });
+    results.forEach(r => { r.exchange = exchange; });
+    wyniki = wyniki.concat(results);
+  }
   if (!wyniki.length) {
     ctx.reply('Brak sygnałów!');
     showMenu(ctx);
     return ctx.answerCbQuery();
   }
-  // Lista sygnałów i do każdej pary jeden przycisk 🔍
+  // Lista sygnałów z nazwą giełdy i do każdej pary przycisk 🔍
   let lines = [];
   let keyboard = [];
   wyniki.forEach((syg, idx) => {
-    lines.push(`${syg.type} ${syg.symbol} (RSI: ${syg.rsi.toFixed(2)})`);
-    keyboard.push([{ text: '🔍', callback_data: `detail_${syg.symbol}_${exchange}_${intervalLabel}` }]);
+    lines.push(`${syg.type} ${syg.symbol} (${syg.exchange.toUpperCase()}), RSI: ${syg.rsi.toFixed(2)}`);
+    keyboard.push([{ text: '🔍', callback_data: `detail_${syg.symbol}_${syg.exchange}_${intervalLabel}` }]);
   });
   ctx.reply(lines.join('\n'), Markup.inlineKeyboard(keyboard));
   ctx.answerCbQuery();
 });
 
-// SZCZEGÓŁOWA ANALIZA TECHNICZNA PO KLIKNIĘCIU "🔍"
+// SZCZEGÓŁOWA ANALIZA TECHNICZNA (działa dla każdej giełdy!)
 bot.action(/detail_(.+)_(.+)_(.+)/, async ctx => {
   const [symbol, exchange, intervalLabel] = [ctx.match[1], ctx.match[2], ctx.match[3]];
   ctx.reply(`Analizuję ${symbol} (${exchange}) na interwale ${intervalLabel} ...`);
-  // Pobierz dane świec dla wybranej pary
   const closes = await downloadCloses(exchange, symbol, intervalLabel);
   if (!closes || closes.length < 15) {
     ctx.reply("Brak świeżych danych do analizy.");
     return ctx.answerCbQuery();
   }
-  // RSI
   const rsi = calculateRSI(closes);
-  // Znajdź wsparcia/opory
   const levels = detectSupportResistance(closes);
-  // News (przykładowo, demo)
   const news = await fetchLatestNews(symbol);
-  // Wygeneruj wykres (link)
   const chartUrl = generateChartUrl(symbol, closes, levels);
-  // Raport
   let msg = `📊 Analiza techniczna ${symbol} (${exchange.toUpperCase()}, ${intervalLabel})\n`;
   msg += `RSI: ${rsi ? rsi.toFixed(2) : "Brak"}\n`;
   msg += `Wsparcia: ${levels.support.map(Number).join(', ')}\n`;
@@ -180,7 +186,6 @@ async function scanRSISignals(exchange, intervalLabel, thresholds) {
           sym === sym.toUpperCase()
         );
     }
-    // Odczyt RSI tylko dla realnych par
     for (const sym of symbols) {
       const closes = await downloadCloses(exchange, sym, intervalLabel);
       if (!closes || closes.length < 15) continue;
@@ -222,7 +227,6 @@ async function downloadCloses(exchange, symbol, intervalLabel) {
   }
 }
 
-// RSI
 function calculateRSI(closes) {
   if (closes.length < 15) return null;
   let gains = 0, losses = 0;
@@ -237,7 +241,6 @@ function calculateRSI(closes) {
   return 100 - (100 / (1 + rs));
 }
 
-// Prosty algorytm wsparcia/oporu
 function detectSupportResistance(closes) {
   let support = [], resistance = [];
   for (let i = 2; i < closes.length - 2; i++) {
@@ -254,7 +257,6 @@ function detectSupportResistance(closes) {
   return { support: support.slice(-3), resistance: resistance.slice(-3), signal };
 }
 
-// NEWS (demo/mock, do rozbudowy)
 async function fetchLatestNews(symbol) {
   try {
     const resp = await axios.get(`https://newsapi.org/v2/everything`, {
@@ -266,7 +268,6 @@ async function fetchLatestNews(symbol) {
   }
 }
 
-// WYKRES (placeholder/demo)
 function generateChartUrl(symbol, closes, levels) {
   return `https://pl.tradingview.com/chart/?symbol=${symbol.replace('USDT','USDT.P')}`;
 }
