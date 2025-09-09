@@ -2,7 +2,7 @@ const { Telegraf, Markup } = require('telegraf');
 const axios = require('axios');
 
 const TOKEN = '8067663229:AAEb3__Kn-UhDopgTHkGCdvdfwaZXRzHmig';
-const ADMIN_ID = 5157140630; // Twój Telegram ID
+const ADMIN_ID = 5157140630;
 
 const exchanges = [
   { key: 'bybit', label: 'Bybit Perpetual' },
@@ -31,15 +31,12 @@ const userDB = {};
 const userConfig = {};
 const bot = new Telegraf(TOKEN);
 
-// ======== PANEL ADMINA ===========
+// ===== PANEL ADMINA =====
 
 bot.command('admin', ctx => {
-  if (ctx.from.id !== ADMIN_ID) {
-    return ctx.reply('Brak uprawnień!');
-  }
+  if (ctx.from.id !== ADMIN_ID) return ctx.reply('Brak uprawnień!');
   ctx.reply('Panel administratora aktywny!\nDostępne komendy:\n/uzytkownicy\n/odblokuj <id>\n/blokuj <id>');
 });
-
 bot.command('uzytkownicy', ctx => {
   if (ctx.from.id !== ADMIN_ID) return;
   let msg = 'Lista użytkowników:\n';
@@ -48,75 +45,68 @@ bot.command('uzytkownicy', ctx => {
   });
   ctx.reply(msg.length > 30 ? msg : 'Brak użytkowników.');
 });
-
 bot.command('odblokuj', ctx => {
   if (ctx.from.id !== ADMIN_ID) return;
-  const parts = ctx.message.text.split(' ');
-  const id = parts[1];
+  const id = ctx.message.text.split(' ')[1];
   if (userDB[id]) {
     userDB[id].accessUntil = Date.now() + 30*24*3600*1000;
     userDB[id].blocked = false;
     ctx.reply(`Użytkownik ${id} odblokowany na 30 dni.`);
-  } else {
-    ctx.reply('Nie znaleziono użytkownika.');
-  }
+  } else ctx.reply('Nie znaleziono użytkownika.');
 });
-
 bot.command('blokuj', ctx => {
   if (ctx.from.id !== ADMIN_ID) return;
-  const parts = ctx.message.text.split(' ');
-  const id = parts[1];
+  const id = ctx.message.text.split(' ')[1];
   if (userDB[id]) {
     userDB[id].blocked = true;
     ctx.reply(`Użytkownik ${id} zablokowany.`);
-  } else {
-    ctx.reply('Nie znaleziono użytkownika.');
-  }
+  } else ctx.reply('Nie znaleziono użytkownika.');
 });
 
-// ======== KONIEC PANELU ADMINA ===========
+// ===== FUNKCJE MENU =====
 
 function showMenu(ctx) {
+  userConfig[ctx.chat.id] = {}; // reset sekwencji, by nie było "zapomnianego" interwału!
   ctx.reply('Wybierz giełdę do skanowania RSI:', Markup.inlineKeyboard(exchangeKeyboard));
 }
 
-// Pokazuje menu przy /start i każdej innej nieobsłużonej wiadomości (oprócz interwałów, admin-komend, wyboru RSI)
-bot.start(ctx => {
-  showMenu(ctx);
-});
+// /start zawsze menu
+bot.start(ctx => showMenu(ctx));
 
-// Zabezpiecza cały przepływ, nie blokuje wyboru interwału ani admina
+// główny catch-all, NIE obsługuje komend, wyboru interwału ani wyboru RSI
 bot.on('message', ctx => {
-  const skip =
-    ctx.message.text &&
-    (
+  const IGNORED = [
+    ...Object.values(bybitIntervalMap),
+    ...Object.values(binanceIntervalMap),
+    ...Object.values(mexcIntervalMap),
+    '1 min','5 min','15 min','30 min','1 godz','4 godz','1 dzień','1 tydzień','1 miesiąc',
+    '99/1','95/5','90/10','80/20','70/30'
+  ];
+  if (ctx.message.text && (
       ctx.message.text.startsWith('/') ||
-      ['1 min','5 min','15 min','30 min','1 godz','4 godz','1 dzień','1 tydzień','1 miesiąc'].includes(ctx.message.text)
-    );
-  if (skip) return;
-  const chatId = ctx.chat.id;
-  if (!userDB[chatId]) userDB[chatId] = { start: Date.now(), accessUntil: Date.now() + 7*24*3600*1000 };
-  if (userDB[chatId].blocked || Date.now() > userDB[chatId].accessUntil) {
-    ctx.reply("Twój dostęp wygasł. Skontaktuj się ze mną, aby odblokować dostęp.");
-    return;
-  }
+      IGNORED.includes(ctx.message.text) ||
+      userConfig[ctx.chat.id]?.awaitingRSI
+    )
+  ) return;
   showMenu(ctx);
 });
 
+// wybór giełdy → interwał
 bot.action(exchanges.map(e=>e.key), ctx => {
-  userConfig[ctx.chat.id] = userConfig[ctx.chat.id] || {};
-  userConfig[ctx.chat.id].exchange = ctx.match[0];
+  userConfig[ctx.chat.id] = { exchange: ctx.match[0] };
   ctx.reply('Wybierz interwał:', Markup.keyboard(intervalKeyboard).oneTime().resize());
   ctx.answerCbQuery();
 });
 
+// wybór interwału → próg RSI
 bot.hears(['1 min','5 min','15 min','30 min','1 godz','4 godz','1 dzień','1 tydzień','1 miesiąc'], ctx => {
-  userConfig[ctx.chat.id] = userConfig[ctx.chat.id] || {};
+  if (!userConfig[ctx.chat.id]) userConfig[ctx.chat.id] = {};
   userConfig[ctx.chat.id].interval = ctx.message.text;
+  userConfig[ctx.chat.id].awaitingRSI = true;
   ctx.reply('Wybierz próg RSI:', Markup.inlineKeyboard(rsiThresholds));
 });
 
-// ======== RSI algorytm i pobieranie ========
+// ===== RSI & SKANOWANIE =====
 function calculateRSI(closes) {
   if (closes.length < 15) return null;
   let gains = 0, losses = 0;
@@ -220,22 +210,22 @@ async function scanRSI(exchange, intervalLabel, thresholds, chatId) {
   await bot.telegram.sendMessage(chatId, msgHead + msg);
 }
 
-// Wybor progu RSI – skanowanie i powrót do menu
+// wybór RSI → skan → menu
 bot.action(/rsi_(\d+)_(\d+)/, async ctx => {
   const chatId = ctx.chat.id;
-  const over = parseInt(ctx.match[1]), under = parseInt(ctx.match[2]);
-  userConfig[chatId] = userConfig[chatId] || {};
-  userConfig[chatId].overbought = over;
-  userConfig[chatId].oversold = under;
+  if (!userConfig[chatId]) userConfig[chatId] = {};
+  userConfig[chatId].overbought = parseInt(ctx.match[1]);
+  userConfig[chatId].oversold = parseInt(ctx.match[2]);
+  userConfig[chatId].awaitingRSI = false;
   const exch = userConfig[chatId].exchange || 'mexc';
   const intervalLabel = userConfig[chatId].interval || '1 godz';
-  await ctx.reply(`Skanuję RSI (${exch.toUpperCase()}) >${over} / <${under} (${intervalLabel})...`);
+  await ctx.reply(`Skanuję RSI (${exch.toUpperCase()}) >${userConfig[chatId].overbought} / <${userConfig[chatId].oversold} (${intervalLabel})...`);
   if (exch === 'all') {
     for (const giełda of exchanges.filter(e => e.key !== 'all')) {
-      await scanRSI(giełda.key, intervalLabel, { overbought: over, oversold: under }, chatId);
+      await scanRSI(giełda.key, intervalLabel, { overbought: userConfig[chatId].overbought, oversold: userConfig[chatId].oversold }, chatId);
     }
   } else {
-    await scanRSI(exch, intervalLabel, { overbought: over, oversold: under }, chatId);
+    await scanRSI(exch, intervalLabel, { overbought: userConfig[chatId].overbought, oversold: userConfig[chatId].oversold }, chatId);
   }
   showMenu(ctx);
   ctx.answerCbQuery();
