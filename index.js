@@ -76,21 +76,24 @@ bot.command('blokuj', ctx => {
 
 // ======== KONIEC PANELU ADMINA ===========
 
-// Pokazuje menu giełdy (po każdym wejściu/menu)
 function showMenu(ctx) {
   ctx.reply('Wybierz giełdę do skanowania RSI:', Markup.inlineKeyboard(exchangeKeyboard));
 }
 
-// Każda wiadomość od usera = menu (nie przesłania wyboru interwału ani admin-komend)
+// Pokazuje menu przy /start i każdej innej nieobsłużonej wiadomości (oprócz interwałów, admin-komend, wyboru RSI)
+bot.start(ctx => {
+  showMenu(ctx);
+});
+
+// Zabezpiecza cały przepływ, nie blokuje wyboru interwału ani admina
 bot.on('message', ctx => {
-  if (
+  const skip =
     ctx.message.text &&
     (
-      ctx.message.text.startsWith('/') || // komendy (np. /admin, /odblokuj)
-      ['1 min','5 min','15 min','30 min','1 godz','4 godz','1 dzień','1 tydzień','1 miesiąc'].includes(ctx.message.text) // wybór interwału
-    )
-  ) return;
-  // Inne wiadomości pokazują menu
+      ctx.message.text.startsWith('/') ||
+      ['1 min','5 min','15 min','30 min','1 godz','4 godz','1 dzień','1 tydzień','1 miesiąc'].includes(ctx.message.text)
+    );
+  if (skip) return;
   const chatId = ctx.chat.id;
   if (!userDB[chatId]) userDB[chatId] = { start: Date.now(), accessUntil: Date.now() + 7*24*3600*1000 };
   if (userDB[chatId].blocked || Date.now() > userDB[chatId].accessUntil) {
@@ -100,7 +103,6 @@ bot.on('message', ctx => {
   showMenu(ctx);
 });
 
-// Wybor giełdy
 bot.action(exchanges.map(e=>e.key), ctx => {
   userConfig[ctx.chat.id] = userConfig[ctx.chat.id] || {};
   userConfig[ctx.chat.id].exchange = ctx.match[0];
@@ -108,14 +110,13 @@ bot.action(exchanges.map(e=>e.key), ctx => {
   ctx.answerCbQuery();
 });
 
-// Wybor interwału – pojawia się klawiatura RSI
 bot.hears(['1 min','5 min','15 min','30 min','1 godz','4 godz','1 dzień','1 tydzień','1 miesiąc'], ctx => {
   userConfig[ctx.chat.id] = userConfig[ctx.chat.id] || {};
   userConfig[ctx.chat.id].interval = ctx.message.text;
   ctx.reply('Wybierz próg RSI:', Markup.inlineKeyboard(rsiThresholds));
 });
 
-// Obliczanie RSI
+// ======== RSI algorytm i pobieranie ========
 function calculateRSI(closes) {
   if (closes.length < 15) return null;
   let gains = 0, losses = 0;
@@ -129,7 +130,6 @@ function calculateRSI(closes) {
   const rs = avgGain / avgLoss;
   return 100 - (100 / (1 + rs));
 }
-
 function chunkArray(array, size) {
   const chunks = [];
   for (let i=0; i<array.length; i+=size) {
@@ -137,8 +137,6 @@ function chunkArray(array, size) {
   }
   return chunks;
 }
-
-// Skanowanie RSI
 async function scanRSI(exchange, intervalLabel, thresholds, chatId) {
   let symbols = [];
   let msgHead = `⭐ Wyniki (${exchange}, interwał ${intervalLabel})\n`;
