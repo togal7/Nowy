@@ -2,7 +2,8 @@ const { Telegraf, Markup } = require('telegraf');
 const axios = require('axios');
 const moment = require('moment');
 
-const TOKEN = 'TU_WSTAW_SWÓJ_TOKEN';
+const TOKEN = '8067663229:AAEb3__Kn-UhDopgTHkGCdvdfwaZXRzHmig';
+
 const exchanges = [
   { key: 'bybit', label: 'Bybit Perpetual' },
   { key: 'binance', label: 'Binance USDT-M' },
@@ -22,23 +23,20 @@ const rsiThresholds = [
   [{ text: '70/30', callback_data: 'rsi_70_30' }]
 ];
 
-// Mapowania interwału na API
 const bybitIntervalMap = { '1 min': '1', '5 min': '5', '15 min': '15','30 min': '30','1 godz': '60','4 godz': '240','1 dzień': 'D','1 tydzień': 'W','1 miesiąc': 'M' };
 const binanceIntervalMap = { '1 min':'1m','5 min':'5m','15 min':'15m','30 min':'30m','1 godz':'1h','4 godz':'4h','1 dzień':'1d','1 tydzień':'1w','1 miesiąc':'1M' };
 const mexcIntervalMap = { '1 min': 'Min1','5 min': 'Min5','15 min': 'Min15','30 min': 'Min30','1 godz': 'Min60','4 godz': 'Hour4','1 dzień': 'Day1','1 tydzień': 'Week1','1 miesiąc': 'Month1' };
 
-// Stan użytkowników: dostęp, wybrane giełdy/interwały/progi
-const userDB = {}; // chatId: { start, blocked, accessUntil }
+const userDB = {};
 const userConfig = {};
-
 const bot = new Telegraf(TOKEN);
 
-// Pokazuj menu po każdym wejściu/użytkowniku
+// Menu giełd przy każdym wejściu
 function getActiveMenu(chatId) {
   bot.telegram.sendMessage(chatId, 'Wybierz giełdę do skanowania RSI:', Markup.inlineKeyboard(exchangeKeyboard));
 }
 
-// Start/blokada na tydzień
+// Testowy tydzień dostępowy
 bot.on('message', ctx => {
   const chatId = ctx.chat.id;
   if (!userDB[chatId]) userDB[chatId] = { start: Date.now(), blocked: false, accessUntil: Date.now() + 7*24*3600*1000 };
@@ -49,19 +47,21 @@ bot.on('message', ctx => {
   getActiveMenu(chatId);
 });
 
+// Wybór giełdy
 bot.action(exchanges.map(e=>e.key), ctx => {
   userConfig[ctx.chat.id] = userConfig[ctx.chat.id] || {};
   userConfig[ctx.chat.id].exchange = ctx.match[0];
   ctx.reply('Wybierz interwał:', Markup.keyboard(intervalKeyboard).oneTime().resize());
 });
 
+// Wybór interwału
 bot.hears(Object.keys(bybitIntervalMap), ctx => {
   userConfig[ctx.chat.id] = userConfig[ctx.chat.id] || {};
   userConfig[ctx.chat.id].interval = ctx.message.text;
   ctx.reply('Wybierz próg RSI:', Markup.inlineKeyboard(rsiThresholds));
 });
 
-// Funkcja RSI
+// RSI liczony lokalnie
 function calculateRSI(closes) {
   if (closes.length < 15) return null;
   let gains = 0, losses = 0;
@@ -76,7 +76,7 @@ function calculateRSI(closes) {
   return 100 - (100 / (1 + rs));
 }
 
-// ------- Skanowanie RSI na różnych giełdach -------
+// Skanowanie RSI dla głównych giełd
 async function scanRSI(exchange, intervalLabel, thresholds, chatId) {
   let symbols = [];
   let msg = `⭐ Wyniki (${exchange}, interwał ${intervalLabel})\n`;
