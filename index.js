@@ -168,7 +168,7 @@ bot.action(/detail_(.+)_(.+)_(.+)/, async ctx => {
   ctx.answerCbQuery();
 });
 
-// ====== OPTYMALIZACJA SKANU RSI (Promise.all + batching!) ======
+// ====== POPRAWIONA skanRSISignals Z BATCHINGIEM I BEZPIECZNYM OBŁSUGIWANIEM BŁĘDÓW ======
 
 async function scanRSISignals(exchange, intervalLabel, thresholds) {
   let symbols = [];
@@ -211,22 +211,26 @@ async function scanRSISignals(exchange, intervalLabel, thresholds) {
           sym === sym.toUpperCase()
         );
     }
-    // OPTYMALIZACJA: Batch po 10 naraz
     for (const batch of chunkArray(symbols, 10)) {
       const batchResults = await Promise.all(batch.map(async sym => {
-        const closes = await downloadCloses(exchange, sym, intervalLabel);
-        if (!closes || closes.length < 15) return null;
-        const rsi = calculateRSI(closes);
-        if (rsi == null) return null;
-        if (rsi < thresholds.oversold) return { symbol: sym, rsi, type: "🟢 Wyprzedane:" };
-        if (rsi > thresholds.overbought) return { symbol: sym, rsi, type: "🔴 Wykupione:" };
+        try {
+          const closes = await downloadCloses(exchange, sym, intervalLabel);
+          if (!closes || closes.length < 15) return null;
+          const rsi = calculateRSI(closes);
+          if (rsi == null) return null;
+          if (rsi < thresholds.oversold) return { symbol: sym, rsi, type: "🟢 Wyprzedane:" };
+          if (rsi > thresholds.overbought) return { symbol: sym, rsi, type: "🔴 Wykupione:" };
+        } catch(e) {
+          return null;
+        }
         return null;
       }));
       results = results.concat(batchResults.filter(x=>x));
-      await new Promise(r=>setTimeout(r, 140)); // drobny delay – opcjonalny!
+      await new Promise(r=>setTimeout(r, 140));
     }
     return results;
-  } catch {
+  } catch (e) {
+    console.log('Błąd globalny scanRSISignals:', e.message);
     return [];
   }
 }
