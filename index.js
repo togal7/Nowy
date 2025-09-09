@@ -81,9 +81,16 @@ function showMenu(ctx) {
   ctx.reply('Wybierz giełdę do skanowania RSI:', Markup.inlineKeyboard(exchangeKeyboard));
 }
 
-// Każda wiadomość od usera = menu (nie przesłania admin-komend)
+// Każda wiadomość od usera = menu (nie przesłania wyboru interwału ani admin-komend)
 bot.on('message', ctx => {
-  if (ctx.message.text && ctx.message.text.startsWith('/')) return; // NIE przesłania komend admina!
+  if (
+    ctx.message.text &&
+    (
+      ctx.message.text.startsWith('/') || // komendy (np. /admin, /odblokuj)
+      ['1 min','5 min','15 min','30 min','1 godz','4 godz','1 dzień','1 tydzień','1 miesiąc'].includes(ctx.message.text) // wybór interwału
+    )
+  ) return;
+  // Inne wiadomości pokazują menu
   const chatId = ctx.chat.id;
   if (!userDB[chatId]) userDB[chatId] = { start: Date.now(), accessUntil: Date.now() + 7*24*3600*1000 };
   if (userDB[chatId].blocked || Date.now() > userDB[chatId].accessUntil) {
