@@ -31,8 +31,7 @@ const userDB = {};
 const userConfig = {};
 const bot = new Telegraf(TOKEN);
 
-// ===== PANEL ADMINA =====
-
+// PANEL ADMINA
 bot.command('admin', ctx => {
   if (ctx.from.id !== ADMIN_ID) return ctx.reply('Brak uprawnień!');
   ctx.reply('Panel administratora aktywny!\nDostępne komendy:\n/uzytkownicy\n/odblokuj <id>\n/blokuj <id>');
@@ -63,50 +62,27 @@ bot.command('blokuj', ctx => {
   } else ctx.reply('Nie znaleziono użytkownika.');
 });
 
-// ===== FUNKCJE MENU =====
-
-function showMenu(ctx) {
-  userConfig[ctx.chat.id] = {}; // reset sekwencji, by nie było "zapomnianego" interwału!
+// MENU STARTOWE
+bot.start(ctx => {
+  userConfig[ctx.chat.id] = {}; // reset sekwencji
   ctx.reply('Wybierz giełdę do skanowania RSI:', Markup.inlineKeyboard(exchangeKeyboard));
-}
-
-// /start zawsze menu
-bot.start(ctx => showMenu(ctx));
-
-// główny catch-all, NIE obsługuje komend, wyboru interwału ani wyboru RSI
-bot.on('message', ctx => {
-  const IGNORED = [
-    ...Object.values(bybitIntervalMap),
-    ...Object.values(binanceIntervalMap),
-    ...Object.values(mexcIntervalMap),
-    '1 min','5 min','15 min','30 min','1 godz','4 godz','1 dzień','1 tydzień','1 miesiąc',
-    '99/1','95/5','90/10','80/20','70/30'
-  ];
-  if (ctx.message.text && (
-      ctx.message.text.startsWith('/') ||
-      IGNORED.includes(ctx.message.text) ||
-      userConfig[ctx.chat.id]?.awaitingRSI
-    )
-  ) return;
-  showMenu(ctx);
 });
 
-// wybór giełdy → interwał
+// WYBÓR GIEŁDY → INTERWAŁ
 bot.action(exchanges.map(e=>e.key), ctx => {
   userConfig[ctx.chat.id] = { exchange: ctx.match[0] };
   ctx.reply('Wybierz interwał:', Markup.keyboard(intervalKeyboard).oneTime().resize());
   ctx.answerCbQuery();
 });
 
-// wybór interwału → próg RSI
+// WYBÓR INTERWAŁU → PRÓG RSI
 bot.hears(['1 min','5 min','15 min','30 min','1 godz','4 godz','1 dzień','1 tydzień','1 miesiąc'], ctx => {
   if (!userConfig[ctx.chat.id]) userConfig[ctx.chat.id] = {};
   userConfig[ctx.chat.id].interval = ctx.message.text;
-  userConfig[ctx.chat.id].awaitingRSI = true;
   ctx.reply('Wybierz próg RSI:', Markup.inlineKeyboard(rsiThresholds));
 });
 
-// ===== RSI & SKANOWANIE =====
+// RSI I SKANOWANIE
 function calculateRSI(closes) {
   if (closes.length < 15) return null;
   let gains = 0, losses = 0;
@@ -210,24 +186,32 @@ async function scanRSI(exchange, intervalLabel, thresholds, chatId) {
   await bot.telegram.sendMessage(chatId, msgHead + msg);
 }
 
-// wybór RSI → skan → menu
+// WYBÓR PROGU RSI → WYNIKI I POWRÓT DO MENU
 bot.action(/rsi_(\d+)_(\d+)/, async ctx => {
   const chatId = ctx.chat.id;
   if (!userConfig[chatId]) userConfig[chatId] = {};
   userConfig[chatId].overbought = parseInt(ctx.match[1]);
   userConfig[chatId].oversold = parseInt(ctx.match[2]);
-  userConfig[chatId].awaitingRSI = false;
   const exch = userConfig[chatId].exchange || 'mexc';
   const intervalLabel = userConfig[chatId].interval || '1 godz';
   await ctx.reply(`Skanuję RSI (${exch.toUpperCase()}) >${userConfig[chatId].overbought} / <${userConfig[chatId].oversold} (${intervalLabel})...`);
   if (exch === 'all') {
     for (const giełda of exchanges.filter(e => e.key !== 'all')) {
-      await scanRSI(giełda.key, intervalLabel, { overbought: userConfig[chatId].overbought, oversold: userConfig[chatId].oversold }, chatId);
+      await scanRSI(giełda.key, intervalLabel, {
+        overbought: userConfig[chatId].overbought,
+        oversold: userConfig[chatId].oversold
+      }, chatId);
     }
   } else {
-    await scanRSI(exch, intervalLabel, { overbought: userConfig[chatId].overbought, oversold: userConfig[chatId].oversold }, chatId);
+    await scanRSI(exch, intervalLabel, {
+      overbought: userConfig[chatId].overbought,
+      oversold: userConfig[chatId].oversold
+    }, chatId);
   }
-  showMenu(ctx);
+  // Powrót do menu
+  userConfig[chatId] = {};
+  ctx.reply('---\nKoniec skanowania.\n');
+  ctx.reply('Wybierz giełdę do skanowania RSI:', Markup.inlineKeyboard(exchangeKeyboard));
   ctx.answerCbQuery();
 });
 
