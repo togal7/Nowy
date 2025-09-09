@@ -15,7 +15,7 @@ const bybitIntervalMap = { '1 min': '1', '5 min': '5', '15 min': '15','30 min': 
 const binanceIntervalMap = { '1 min':'1m','5 min':'5m','15 min':'15m','30 min':'30m','1 godz':'1h','4 godz':'4h','1 dzień':'1d','1 tydzień':'1w','1 miesiąc':'1M' };
 const mexcIntervalMap = { '1 min': 'Min1','5 min': 'Min5','15 min': 'Min15','30 min': 'Min30','1 godz': 'Min60','4 godz': 'Hour4','1 dzień': 'Day1','1 tydzień': 'Week1','1 miesiąc': 'Month1' };
 
-const exchangeKeyboard = [ exchanges.map(e => ({ text: e.label, callback_data: e.key })) ];
+const exchangeKeyboard = [exchanges.map(e => ({ text: e.label, callback_data: e.key }))];
 const intervalKeyboard = [
   ['1 min','5 min','15 min'],
   ['30 min','1 godz','4 godz'],
@@ -31,12 +31,12 @@ const userDB = {};
 const userConfig = {};
 const bot = new Telegraf(TOKEN);
 
-// Start/menu – zawsze wywołuj na początek i po każdym skanowaniu
+// Pokazuj menu po każdym wejściu i po analizie
 function showMenu(ctx) {
   ctx.reply('Wybierz giełdę do skanowania RSI:', Markup.inlineKeyboard(exchangeKeyboard));
 }
 
-// Akceptuj dowolną wiadomość jako start menu
+// Każda wiadomość od usera startuje menu (w tym /start)
 bot.on('message', ctx => {
   const chatId = ctx.chat.id;
   if (!userDB[chatId]) userDB[chatId] = { start: Date.now(), accessUntil: Date.now() + 7*24*3600*1000 };
@@ -47,7 +47,7 @@ bot.on('message', ctx => {
   showMenu(ctx);
 });
 
-// Proces wyboru giełdy → zapis → interwał
+// Wybor giełdy
 bot.action(exchanges.map(e=>e.key), ctx => {
   userConfig[ctx.chat.id] = userConfig[ctx.chat.id] || {};
   userConfig[ctx.chat.id].exchange = ctx.match[0];
@@ -55,31 +55,11 @@ bot.action(exchanges.map(e=>e.key), ctx => {
   ctx.answerCbQuery();
 });
 
-// Obsługa wyboru interwału – po nim wysyłamy klawiaturę progów RSI
+// Wybor interwału – potem klawiatura RSI
 bot.hears(['1 min','5 min','15 min','30 min','1 godz','4 godz','1 dzień','1 tydzień','1 miesiąc'], ctx => {
   userConfig[ctx.chat.id] = userConfig[ctx.chat.id] || {};
   userConfig[ctx.chat.id].interval = ctx.message.text;
   ctx.reply('Wybierz próg RSI:', Markup.inlineKeyboard(rsiThresholds));
-});
-
-// Obsługa wyboru progu RSI – tu uruchamiamy scanRSI
-bot.action(/rsi_(\d+)_(\d+)/, async ctx => {
-  const chatId = ctx.chat.id;
-  const over = parseInt(ctx.match[1]), under = parseInt(ctx.match[2]);
-  userConfig[chatId] = userConfig[chatId] || {};
-  userConfig[chatId].overbought = over;
-  userConfig[chatId].oversold = under;
-  const exch = userConfig[chatId].exchange || 'mexc';
-  const intervalLabel = userConfig[chatId].interval || '1 godz';
-  await ctx.reply(`Skanuję RSI (${exch.toUpperCase()}) >${over} / <${under} (${intervalLabel})...`);
-  if (exch === 'all') {
-    for (const giełda of exchanges.filter(e => e.key !== 'all')) {
-      await scanRSI(giełda.key, intervalLabel, { overbought: over, oversold: under }, chatId);
-    }
-  } else {
-    await scanRSI(exch, intervalLabel, { overbought: over, oversold: under }, chatId);
-  }
-  showMenu(ctx); // Po każdym skanowaniu wracaj do menu
 });
 
 // Algorytm RSI
@@ -105,7 +85,7 @@ function chunkArray(array, size) {
   return chunks;
 }
 
-// Funkcja skanująca RSI REALNE na Bybit/Binance/MEXC
+// Skanowanie RSI
 async function scanRSI(exchange, intervalLabel, thresholds, chatId) {
   let symbols = [];
   let msgHead = `⭐ Wyniki (${exchange}, interwał ${intervalLabel})\n`;
@@ -179,12 +159,34 @@ async function scanRSI(exchange, intervalLabel, thresholds, chatId) {
         }));
         msg += results.filter(x => x).join('');
       }
-    } else { msg += 'Obsługa tej giełdy wymaga podania publicznego API endpointu.'; }
+    } else {
+      msg += 'Obsługa tej giełdy wymaga podania publicznego API endpointu.';
+    }
   } catch (e) {
-    msg += '\nBłąd podczas pobierania danych!\n' + (e.message||'');
+    msg += '\nBłąd pobierania danych!\n' + (e.message||'');
   }
   if (msg.trim() === '') msg = 'Brak sygnałów!';
   await bot.telegram.sendMessage(chatId, msgHead + msg);
 }
+
+// Wybor progu RSI – odpala skanowanie i wraca do menu
+bot.action(/rsi_(\d+)_(\d+)/, async ctx => {
+  const chatId = ctx.chat.id;
+  const over = parseInt(ctx.match[1]), under = parseInt(ctx.match[2]);
+  userConfig[chatId] = userConfig[chatId] || {};
+  userConfig[chatId].overbought = over;
+  userConfig[chatId].oversold = under;
+  const exch = userConfig[chatId].exchange || 'mexc';
+  const intervalLabel = userConfig[chatId].interval || '1 godz';
+  await ctx.reply(`Skanuję RSI (${exch.toUpperCase()}) >${over} / <${under} (${intervalLabel})...`);
+  if (exch === 'all') {
+    for (const giełda of exchanges.filter(e => e.key !== 'all')) {
+      await scanRSI(giełda.key, intervalLabel, { overbought: over, oversold: under }, chatId);
+    }
+  } else {
+    await scanRSI(exch, intervalLabel, { overbought: over, oversold: under }, chatId);
+  }
+  showMenu(ctx);
+});
 
 bot.launch();
