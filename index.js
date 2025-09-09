@@ -121,7 +121,13 @@ async function scanRSI(exchange, intervalLabel, thresholds, chatId) {
     } else if (exchange === 'mexc') {
       const s = await axios.get('https://contract.mexc.com/api/v1/contract/detail');
       symbols = s.data.data
-        .filter(x => x.quoteCoin === 'USDT')
+        .filter(x =>
+          x.quoteCoin === 'USDT' &&
+          (
+            x.state === 'ENABLED' || x.state === '1' ||
+            x.status === 'listed' || x.status === 'TRADING'
+          )
+        )
         .map(x => x.symbol)
         .filter(sym =>
           !sym.includes('STOCK') &&
