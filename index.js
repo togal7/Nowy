@@ -168,11 +168,16 @@ bot.action(/detail_(.+)_(.+)_(.+)/, async ctx => {
   ctx.answerCbQuery();
 });
 
-// ===== ANALITYKA I POBIERANIE DANYCH =====
+// ====== OPTYMALIZACJA SKANU RSI (Promise.all + batching!) ======
 
 async function scanRSISignals(exchange, intervalLabel, thresholds) {
   let symbols = [];
   let results = [];
+  function chunkArray(arr, size) {
+    const res = [];
+    for (let i=0; i<arr.length; i+=size) res.push(arr.slice(i, i+size));
+    return res;
+  }
   try {
     if (exchange === 'bybit') {
       const s = await axios.get('https://api.bybit.com/v5/market/instruments-info?category=linear');
@@ -206,13 +211,19 @@ async function scanRSISignals(exchange, intervalLabel, thresholds) {
           sym === sym.toUpperCase()
         );
     }
-    for (const sym of symbols) {
-      const closes = await downloadCloses(exchange, sym, intervalLabel);
-      if (!closes || closes.length < 15) continue;
-      const rsi = calculateRSI(closes);
-      if (rsi == null) continue;
-      if (rsi < thresholds.oversold) results.push({ symbol: sym, rsi, type: "🟢 Wyprzedane:" });
-      if (rsi > thresholds.overbought) results.push({ symbol: sym, rsi, type: "🔴 Wykupione:" });
+    // OPTYMALIZACJA: Batch po 10 naraz
+    for (const batch of chunkArray(symbols, 10)) {
+      const batchResults = await Promise.all(batch.map(async sym => {
+        const closes = await downloadCloses(exchange, sym, intervalLabel);
+        if (!closes || closes.length < 15) return null;
+        const rsi = calculateRSI(closes);
+        if (rsi == null) return null;
+        if (rsi < thresholds.oversold) return { symbol: sym, rsi, type: "🟢 Wyprzedane:" };
+        if (rsi > thresholds.overbought) return { symbol: sym, rsi, type: "🔴 Wykupione:" };
+        return null;
+      }));
+      results = results.concat(batchResults.filter(x=>x));
+      await new Promise(r=>setTimeout(r, 140)); // drobny delay – opcjonalny!
     }
     return results;
   } catch {
