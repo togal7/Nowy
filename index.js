@@ -2,6 +2,7 @@ const { Telegraf, Markup } = require('telegraf');
 const axios = require('axios');
 
 const TOKEN = '8067663229:AAEb3__Kn-UhDopgTHkGCdvdfwaZXRzHmig';
+const ADMIN_ID = 5157140630; // <-- Twój Telegram ID
 
 const exchanges = [
   { key: 'bybit', label: 'Bybit Perpetual' },
@@ -30,20 +31,69 @@ const userDB = {};
 const userConfig = {};
 const bot = new Telegraf(TOKEN);
 
+// ======== PANEL ADMINA ===========
+
+bot.command('admin', ctx => {
+  if (ctx.from.id !== ADMIN_ID) {
+    return ctx.reply('Brak uprawnień!');
+  }
+  ctx.reply('Panel administratora aktywny!\nDostępne komendy:\n/uzytkownicy\n/odblokuj <id>\n/blokuj <id>');
+});
+
+bot.command('uzytkownicy', ctx => {
+  if (ctx.from.id !== ADMIN_ID) return;
+  let msg = 'Lista użytkowników:\n';
+  Object.entries(userDB).forEach(([uid, obj]) => {
+    msg += `ID: ${uid}, dostęp do: ${new Date(obj.accessUntil).toLocaleDateString()}\n`;
+  });
+  ctx.reply(msg.length > 30 ? msg : 'Brak użytkowników.');
+});
+
+bot.command('odblokuj', ctx => {
+  if (ctx.from.id !== ADMIN_ID) return;
+  const parts = ctx.message.text.split(' ');
+  const id = parts[1];
+  if (userDB[id]) {
+    userDB[id].accessUntil = Date.now() + 30*24*3600*1000;
+    userDB[id].blocked = false;
+    ctx.reply(`Użytkownik ${id} odblokowany na 30 dni.`);
+  } else {
+    ctx.reply('Nie znaleziono użytkownika.');
+  }
+});
+
+bot.command('blokuj', ctx => {
+  if (ctx.from.id !== ADMIN_ID) return;
+  const parts = ctx.message.text.split(' ');
+  const id = parts[1];
+  if (userDB[id]) {
+    userDB[id].blocked = true;
+    ctx.reply(`Użytkownik ${id} zablokowany.`);
+  } else {
+    ctx.reply('Nie znaleziono użytkownika.');
+  }
+});
+
+// ======== KONIEC PANELU ADMINA ===========
+
+// Pokazuje menu giełdy (po każdym wejściu/menu)
 function showMenu(ctx) {
   ctx.reply('Wybierz giełdę do skanowania RSI:', Markup.inlineKeyboard(exchangeKeyboard));
 }
 
+// Każda wiadomość od usera = menu (nie przesłania admin-komend)
 bot.on('message', ctx => {
+  if (ctx.message.text && ctx.message.text.startsWith('/')) return; // NIE przesłania komend admina!
   const chatId = ctx.chat.id;
   if (!userDB[chatId]) userDB[chatId] = { start: Date.now(), accessUntil: Date.now() + 7*24*3600*1000 };
-  if (Date.now() > userDB[chatId].accessUntil) {
+  if (userDB[chatId].blocked || Date.now() > userDB[chatId].accessUntil) {
     ctx.reply("Twój dostęp wygasł. Skontaktuj się ze mną, aby odblokować dostęp.");
     return;
   }
   showMenu(ctx);
 });
 
+// Wybor giełdy
 bot.action(exchanges.map(e=>e.key), ctx => {
   userConfig[ctx.chat.id] = userConfig[ctx.chat.id] || {};
   userConfig[ctx.chat.id].exchange = ctx.match[0];
@@ -51,12 +101,14 @@ bot.action(exchanges.map(e=>e.key), ctx => {
   ctx.answerCbQuery();
 });
 
+// Wybor interwału – pojawia się klawiatura RSI
 bot.hears(['1 min','5 min','15 min','30 min','1 godz','4 godz','1 dzień','1 tydzień','1 miesiąc'], ctx => {
   userConfig[ctx.chat.id] = userConfig[ctx.chat.id] || {};
   userConfig[ctx.chat.id].interval = ctx.message.text;
   ctx.reply('Wybierz próg RSI:', Markup.inlineKeyboard(rsiThresholds));
 });
 
+// Obliczanie RSI
 function calculateRSI(closes) {
   if (closes.length < 15) return null;
   let gains = 0, losses = 0;
@@ -79,6 +131,7 @@ function chunkArray(array, size) {
   return chunks;
 }
 
+// Skanowanie RSI
 async function scanRSI(exchange, intervalLabel, thresholds, chatId) {
   let symbols = [];
   let msgHead = `⭐ Wyniki (${exchange}, interwał ${intervalLabel})\n`;
@@ -162,6 +215,7 @@ async function scanRSI(exchange, intervalLabel, thresholds, chatId) {
   await bot.telegram.sendMessage(chatId, msgHead + msg);
 }
 
+// Wybor progu RSI – skanowanie i powrót do menu
 bot.action(/rsi_(\d+)_(\d+)/, async ctx => {
   const chatId = ctx.chat.id;
   const over = parseInt(ctx.match[1]), under = parseInt(ctx.match[2]);
