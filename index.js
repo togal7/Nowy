@@ -7,7 +7,7 @@ const ADMIN_ID = 5157140630;
 const exchanges = [
   { key: 'bybit', label: 'Bybit Perpetual' },
   { key: 'binance', label: 'Binance USDT-M' },
-  { key: 'mexc', label: 'MEXC Futures' },
+  { key: 'mexc', label: 'MEXC Futures' }
 ];
 
 const bybitIntervalMap = { '1 min': '1', '5 min': '5', '15 min': '15','30 min': '30','1 godz': '60','4 godz': '240','1 dzień': 'D','1 tydzień': 'W','1 miesiąc': 'M' };
@@ -84,7 +84,7 @@ bot.hears(['1 min','5 min','15 min','30 min','1 godz','4 godz','1 dzień','1 tyd
   ctx.reply('Wybierz próg RSI:', Markup.inlineKeyboard(rsiThresholds));
 });
 
-// WYBÓR PROGU RSI → LISTA PAR
+// WYBÓR PROGU RSI → WYNIKI RSI Z PRZYCISKAMI
 bot.action(/rsi_(\d+)_(\d+)/, async ctx => {
   const chatId = ctx.chat.id;
   if (!userConfig[chatId]) userConfig[chatId] = {};
@@ -92,42 +92,46 @@ bot.action(/rsi_(\d+)_(\d+)/, async ctx => {
   userConfig[chatId].oversold = parseInt(ctx.match[2]);
   const exchange = userConfig[chatId].exchange || 'mexc';
   const intervalLabel = userConfig[chatId].interval || '1 godz';
-  // Pobierz listę par
-  let pairs = await getAvailablePairs(exchange);
-  // Prezentacja wyboru par w menu
-  const keyboards = [];
-  for (let i = 0; i < pairs.length; i += 3) {
-    keyboards.push(pairs.slice(i, i+3).map(p => ({ text: p, callback_data: `pair_${p}` })));
+  ctx.reply(`Skanuję RSI (${exchange.toUpperCase()}) >${userConfig[chatId].overbought} / <${userConfig[chatId].oversold} (${intervalLabel})...`);
+  // Wyszukaj sygnały RSI
+  const wyniki = await scanRSISignals(exchange, intervalLabel, { overbought: userConfig[chatId].overbought, oversold: userConfig[chatId].oversold });
+  if (!wyniki.length) {
+    ctx.reply('Brak sygnałów!');
+    showMenu(ctx);
+    return ctx.answerCbQuery();
   }
-  ctx.reply(`Wybierz parę do analizy technicznej (${exchange.toUpperCase()}, ${intervalLabel}):`, Markup.inlineKeyboard(keyboards));
+  // Lista sygnałów i do każdej pary jeden przycisk 🔍
+  let lines = [];
+  let keyboard = [];
+  wyniki.forEach((syg, idx) => {
+    lines.push(`${syg.type} ${syg.symbol} (RSI: ${syg.rsi.toFixed(2)})`);
+    keyboard.push([{ text: '🔍', callback_data: `detail_${syg.symbol}_${exchange}_${intervalLabel}` }]);
+  });
+  ctx.reply(lines.join('\n'), Markup.inlineKeyboard(keyboard));
   ctx.answerCbQuery();
 });
 
-// ANALIZA TECHNICZNA PO WYBORZE PARY
-bot.action(/pair_(.+)/, async ctx => {
-  const chatId = ctx.chat.id;
-  const pair = ctx.match[1];
-  const exch = userConfig[chatId].exchange || 'mexc';
-  const intervalLabel = userConfig[chatId].interval || '1 godz';
-  ctx.reply(`Analizuję ${pair} (${exch}) na interwale ${intervalLabel} ...`);
+// SZCZEGÓŁOWA ANALIZA TECHNICZNA PO KLIKNIĘCIU "🔍"
+bot.action(/detail_(.+)_(.+)_(.+)/, async ctx => {
+  const [symbol, exchange, intervalLabel] = [ctx.match[1], ctx.match[2], ctx.match[3]];
+  ctx.reply(`Analizuję ${symbol} (${exchange}) na interwale ${intervalLabel} ...`);
   // Pobierz dane świec dla wybranej pary
-  const closes = await downloadCloses(exch, pair, intervalLabel);
+  const closes = await downloadCloses(exchange, symbol, intervalLabel);
   if (!closes || closes.length < 15) {
     ctx.reply("Brak świeżych danych do analizy.");
-    return;
+    return ctx.answerCbQuery();
   }
   // RSI
   const rsi = calculateRSI(closes);
   // Znajdź wsparcia/opory
   const levels = detectSupportResistance(closes);
   // News (przykładowo, demo)
-  const news = await fetchLatestNews(pair);
-  // Wygeneruj wykres (tu jako link)
-  const chartUrl = generateChartUrl(pair, closes, levels);
-
-  // Przygotuj raport
-  let msg = `📊 Analiza techniczna ${pair} (${exch.toUpperCase()}, ${intervalLabel})\n`;
-  msg += `RSI: ${rsi ? rsi.toFixed(2) : "Blad obliczeń"}\n`;
+  const news = await fetchLatestNews(symbol);
+  // Wygeneruj wykres (link)
+  const chartUrl = generateChartUrl(symbol, closes, levels);
+  // Raport
+  let msg = `📊 Analiza techniczna ${symbol} (${exchange.toUpperCase()}, ${intervalLabel})\n`;
+  msg += `RSI: ${rsi ? rsi.toFixed(2) : "Brak"}\n`;
   msg += `Wsparcia: ${levels.support.map(Number).join(', ')}\n`;
   msg += `Opory: ${levels.resistance.map(Number).join(', ')}\n`;
   msg += levels.signal ? `Sygnał: ${levels.signal}\n` : '';
@@ -138,24 +142,25 @@ bot.action(/pair_(.+)/, async ctx => {
   ctx.answerCbQuery();
 });
 
-// === NARZĘDZIA ALGORYTMICZNE ===
+// ===== ANALITYKA I POBIERANIE DANYCH =====
 
-// Pobierz listę realnych par na danej giełdzie (krypto USDTPERP USDT-MEXC/Bybit/Binance)
-async function getAvailablePairs(exchange) {
+async function scanRSISignals(exchange, intervalLabel, thresholds) {
+  let symbols = [];
+  let results = [];
   try {
     if (exchange === 'bybit') {
       const s = await axios.get('https://api.bybit.com/v5/market/instruments-info?category=linear');
-      return s.data.result.list.filter(x =>
+      symbols = s.data.result.list.filter(x =>
         x.status === 'Trading' && x.symbol.endsWith('USDT'))
         .map(x => x.symbol);
     } else if (exchange === 'binance') {
       const s = await axios.get('https://fapi.binance.com/fapi/v1/exchangeInfo');
-      return s.data.symbols.filter(x =>
+      symbols = s.data.symbols.filter(x =>
         x.status === 'TRADING' && x.symbol.endsWith('USDT'))
         .map(x => x.symbol);
     } else if (exchange === 'mexc') {
       const s = await axios.get('https://contract.mexc.com/api/v1/contract/detail');
-      return s.data.data
+      symbols = s.data.data
         .filter(x =>
           x.quoteCoin === 'USDT' &&
           (
@@ -175,27 +180,35 @@ async function getAvailablePairs(exchange) {
           sym === sym.toUpperCase()
         );
     }
-    return [];
+    // Odczyt RSI tylko dla realnych par
+    for (const sym of symbols) {
+      const closes = await downloadCloses(exchange, sym, intervalLabel);
+      if (!closes || closes.length < 15) continue;
+      const rsi = calculateRSI(closes);
+      if (rsi == null) continue;
+      if (rsi < thresholds.oversold) results.push({ symbol: sym, rsi, type: "🟢 Wyprzedane:" });
+      if (rsi > thresholds.overbought) results.push({ symbol: sym, rsi, type: "🔴 Wykupione:" });
+    }
+    return results;
   } catch {
     return [];
   }
 }
 
-// Pobierz dane zamknięcia dla wybranej pary i interwału
 async function downloadCloses(exchange, symbol, intervalLabel) {
   try {
     if (exchange === 'bybit') {
-      const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${bybitIntervalMap[intervalLabel]}&limit=200`;
+      const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${bybitIntervalMap[intervalLabel]}&limit=50`;
       const resp = await axios.get(url);
       if (!resp.data.result || !resp.data.result.list || resp.data.result.list.length < 15) return null;
       return resp.data.result.list.map(k => parseFloat(k[4]));
     } else if (exchange === 'binance') {
-      const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${binanceIntervalMap[intervalLabel]}&limit=200`;
+      const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${binanceIntervalMap[intervalLabel]}&limit=50`;
       const resp = await axios.get(url);
       if (!Array.isArray(resp.data) || resp.data.length < 15) return null;
       return resp.data.map(k => parseFloat(k[4]));
     } else if (exchange === 'mexc') {
-      const url = `https://contract.mexc.com/api/v1/contract/kline/${symbol}?interval=${mexcIntervalMap[intervalLabel]}&limit=200`;
+      const url = `https://contract.mexc.com/api/v1/contract/kline/${symbol}?interval=${mexcIntervalMap[intervalLabel]}&limit=50`;
       const resp = await axios.get(url);
       if (Array.isArray(resp.data.data) && resp.data.data.length >= 15) {
         return resp.data.data.map(k => parseFloat(k[4]));
@@ -224,7 +237,7 @@ function calculateRSI(closes) {
   return 100 - (100 / (1 + rs));
 }
 
-// AI/Algorytmiczne wsparcia/opory (prosty przykład)
+// Prosty algorytm wsparcia/oporu
 function detectSupportResistance(closes) {
   let support = [], resistance = [];
   for (let i = 2; i < closes.length - 2; i++) {
@@ -235,30 +248,26 @@ function detectSupportResistance(closes) {
       resistance.push(closes[i]);
     }
   }
-  // Sygnał: bullish jeśli ostatni close > ostatni support, bearish jeśli < ostatni resistance
   let signal = null;
   if (support.length > 0 && closes[closes.length-1] > support[support.length-1]) signal = "LONG/odbicie od wsparcia";
   if (resistance.length > 0 && closes[closes.length-1] < resistance[resistance.length-1]) signal = "SHORT/przebicie oporu";
   return { support: support.slice(-3), resistance: resistance.slice(-3), signal };
 }
 
-// News/sentyment (mock-up/demo – tu pobiera tylko nagłówki, do rozbudowy pod AI i news-sentiment)
+// NEWS (demo/mock, do rozbudowy)
 async function fetchLatestNews(symbol) {
   try {
-    // Przykład: pobierz 3 newsy z Google News API (możesz zamienić na prawdziwy provider)
     const resp = await axios.get(`https://newsapi.org/v2/everything`, {
-      params: { q: symbol.replace('USDT',''), pageSize: 3, apiKey: 'demo' } // demo key!
+      params: { q: symbol.replace('USDT',''), pageSize: 3, apiKey: 'demo' }
     });
     return resp.data.articles.slice(0, 3).map(news => `${news.title} (${news.source.name})`);
   } catch {
-    // Demo fallback
     return [`Brak najnowszych newsów lub błąd API.`];
   }
 }
 
-// Wygeneruj wykres (mock – możesz użyć chart-js-image, TradingView snapshot, matplotlib, etc.)
+// WYKRES (placeholder/demo)
 function generateChartUrl(symbol, closes, levels) {
-  // Link do TradingView (podstawowy, bez logowania)
   return `https://pl.tradingview.com/chart/?symbol=${symbol.replace('USDT','USDT.P')}`;
 }
 
