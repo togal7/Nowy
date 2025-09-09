@@ -2,7 +2,7 @@ const { Telegraf, Markup } = require('telegraf');
 const axios = require('axios');
 
 const TOKEN = '8067663229:AAEb3__Kn-UhDopgTHkGCdvdfwaZXRzHmig';
-const ADMIN_ID = 5157140630; // <-- Twój Telegram ID
+const ADMIN_ID = 5157140630; // Twój Telegram ID
 
 const exchanges = [
   { key: 'bybit', label: 'Bybit Perpetual' },
@@ -206,7 +206,7 @@ async function scanRSI(exchange, intervalLabel, thresholds, chatId) {
         msg += results.filter(x => x).join('');
       }
     } else {
-      msg += 'Obsługa tej giełdy wymaga podania publicznego API endpointu.';
+      msg += 'Obsługa tej giełdy została wyłączona.';
     }
   } catch (e) {
     msg += '\nBłąd pobierania danych!\n' + (e.message||'');
