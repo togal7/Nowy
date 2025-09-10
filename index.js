@@ -1,6 +1,10 @@
 const { Telegraf, Markup } = require('telegraf');
 const axios = require('axios');
 
+// GLOBALNE CATCHERY przy samym starcie
+process.on('unhandledRejection', err => { console.error('UNHANDLED REJECTION:', err); });
+process.on('uncaughtException', err => { console.error('UNCAUGHT EXCEPTION:', err); });
+
 const TOKEN = '8067663229:AAEb3__Kn-UhDopgTHkGCdvdfwaZXRzHmig';
 const ADMIN_ID = 5157140630;
 
@@ -135,7 +139,6 @@ bot.action(/rsi_(\d+)_(\d+)/, async ctx => {
     showMenu(ctx);
     return ctx.answerCbQuery();
   }
-  // Każda linia sygnału to cały przycisk
   let keyboard = wyniki.map(syg => [{
     text: `${syg.type} ${syg.symbol} (${syg.exchange.toUpperCase()}), RSI: ${syg.rsi.toFixed(2)}`,
     callback_data: `detail_${syg.symbol}_${syg.exchange}_${intervalLabel}`
@@ -168,7 +171,7 @@ bot.action(/detail_(.+)_(.+)_(.+)/, async ctx => {
   ctx.answerCbQuery();
 });
 
-// ====== POPRAWIONA skanRSISignals Z BATCHINGIEM I BEZPIECZNYM OBŁSUGIWANIEM BŁĘDÓW ======
+// ==== WYTRZYMAŁY BATCH-BOT: CAŁA WALIDACJA W TRY/CATCH! ====
 
 async function scanRSISignals(exchange, intervalLabel, thresholds) {
   let symbols = [];
@@ -221,6 +224,7 @@ async function scanRSISignals(exchange, intervalLabel, thresholds) {
           if (rsi < thresholds.oversold) return { symbol: sym, rsi, type: "🟢 Wyprzedane:" };
           if (rsi > thresholds.overbought) return { symbol: sym, rsi, type: "🔴 Wykupione:" };
         } catch(e) {
+          console.error('Error dla symbolu', sym, e);
           return null;
         }
         return null;
