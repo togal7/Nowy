@@ -1,7 +1,7 @@
 const { Telegraf, Markup } = require('telegraf');
 const axios = require('axios');
 
-// GLOBALNE CATCHERY przy samym starcie
+// GLOBALNE CATCHERY dla Railway
 process.on('unhandledRejection', err => { console.error('UNHANDLED REJECTION:', err); });
 process.on('uncaughtException', err => { console.error('UNCAUGHT EXCEPTION:', err); });
 
@@ -141,14 +141,15 @@ bot.action(/rsi_(\d+)_(\d+)/, async ctx => {
   }
   let keyboard = wyniki.map(syg => [{
     text: `${syg.type} ${syg.symbol} (${syg.exchange.toUpperCase()}), RSI: ${syg.rsi.toFixed(2)}`,
-    callback_data: `detail_${syg.symbol}_${syg.exchange}_${intervalLabel}`
+    callback_data: `detail_${syg.symbol}_${syg.exchange}_${intervalLabel}_${syg.type === "🟢 Wyprzedane:" ? "LONG" : "SHORT"}`
   }]);
-  ctx.reply(`Kliknij wybrany sygnał, aby zobaczyć analizę techniczną:`, Markup.inlineKeyboard(keyboard));
+  ctx.reply(`Kliknij wybrany sygnał, aby zobaczyć analizę techniczną i poziom TP:`, Markup.inlineKeyboard(keyboard));
   ctx.answerCbQuery();
 });
 
-bot.action(/detail_(.+)_(.+)_(.+)/, async ctx => {
-  const [symbol, exchange, intervalLabel] = [ctx.match[1], ctx.match[2], ctx.match[3]];
+// SZCZEGÓŁOWA ANALIZA Z TP
+bot.action(/detail_(.+)_(.+)_(.+)_(LONG|SHORT)/, async ctx => {
+  const [symbol, exchange, intervalLabel, direction] = [ctx.match[1], ctx.match[2], ctx.match[3], ctx.match[4]];
   ctx.reply(`Analizuję ${symbol} (${exchange}) na interwale ${intervalLabel} ...`);
   const closes = await downloadCloses(exchange, symbol, intervalLabel);
   if (!closes || closes.length < 15) {
@@ -159,10 +160,15 @@ bot.action(/detail_(.+)_(.+)_(.+)/, async ctx => {
   const levels = detectSupportResistance(closes);
   const news = await fetchLatestNews(symbol);
   const chartUrl = generateChartUrl(symbol, closes, levels);
+  const lastClose = closes[closes.length-1];
+  const tp = calculateTakeProfit(levels, lastClose, direction);
+
   let msg = `📊 Analiza techniczna ${symbol} (${exchange.toUpperCase()}, ${intervalLabel})\n`;
   msg += `RSI: ${rsi ? rsi.toFixed(2) : "Brak"}\n`;
+  msg += `Kierunek sygnału: ${direction === "LONG" ? "Kup (LONG)" : "Sprzedaż (SHORT)"}\n`;
   msg += `Wsparcia: ${levels.support.map(Number).join(', ')}\n`;
   msg += `Opory: ${levels.resistance.map(Number).join(', ')}\n`;
+  msg += tp.tpMsg + '\n';
   msg += levels.signal ? `Sygnał: ${levels.signal}\n` : '';
   if (news) msg += `\n📰 Najnowsze newsy:\n${news.join('\n')}\n`;
   msg += `\n[Zobacz wykres](${chartUrl})`;
@@ -171,7 +177,34 @@ bot.action(/detail_(.+)_(.+)_(.+)/, async ctx => {
   ctx.answerCbQuery();
 });
 
-// ==== WYTRZYMAŁY BATCH-BOT: CAŁA WALIDACJA W TRY/CATCH! ====
+// WYZNACZANIE TP
+function calculateTakeProfit(levels, lastClose, direction) {
+  let tpMsg = '';
+  if (direction === "LONG") {
+    // TP = najbliższy opór powyżej zamknięcia
+    const possible = levels.resistance.filter(res => res > lastClose).sort((a,b)=>a-b);
+    if (possible.length) {
+      const tp = possible[0];
+      tpMsg = `🎯 Sugerowany TP: ${tp.toFixed(4)} (+${((tp/lastClose-1)*100).toFixed(2)}%) (najbliższy opór)`;
+    } else {
+      const tp = lastClose * 1.02;
+      tpMsg = `🎯 Sugerowany TP: ${tp.toFixed(4)} (+2%, brak wyraźnego oporu powyżej)`;
+    }
+  } else {
+    // TP = najbliższe wsparcie poniżej zamknięcia
+    const possible = levels.support.filter(sup => sup < lastClose).sort((a,b)=>b-a);
+    if (possible.length) {
+      const tp = possible[0];
+      tpMsg = `🎯 Sugerowany TP: ${tp.toFixed(4)} (${((tp/lastClose-1)*100).toFixed(2)}%) (najbliższe wsparcie)`;
+    } else {
+      const tp = lastClose * 0.98;
+      tpMsg = `🎯 Sugerowany TP: ${tp.toFixed(4)} (-2%, brak wyraźnego wsparcia poniżej)`;
+    }
+  }
+  return { tpMsg };
+}
+
+// --- POZOSTAŁA LOGIKA BEZ ZMIAN ---
 
 async function scanRSISignals(exchange, intervalLabel, thresholds) {
   let symbols = [];
@@ -223,10 +256,7 @@ async function scanRSISignals(exchange, intervalLabel, thresholds) {
           if (rsi == null) return null;
           if (rsi < thresholds.oversold) return { symbol: sym, rsi, type: "🟢 Wyprzedane:" };
           if (rsi > thresholds.overbought) return { symbol: sym, rsi, type: "🔴 Wykupione:" };
-        } catch(e) {
-          console.error('Error dla symbolu', sym, e);
-          return null;
-        }
+        } catch(e) { return null; }
         return null;
       }));
       results = results.concat(batchResults.filter(x=>x));
