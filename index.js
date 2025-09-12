@@ -6,7 +6,7 @@ process.on('uncaughtException', err => { console.error('UNCAUGHT EXCEPTION:', er
 
 const TOKEN = '8067663229:AAEb3__Kn-UhDopgTHkGCdvdfwaZXRzHmig';
 const ADMIN_ID = 5157140630;
-const MAX_SYMBOLS = 20; // Startowo ogranicz na test
+const MAX_SYMBOLS = 50; // dla pełnych giełd polecam 50-100+ (tyle ile pozwala Railway; zwiększ/zmniejsz w razie timeoutów)
 
 const exchanges = [
   { key: 'bybit', label: 'Bybit Perpetual' },
@@ -143,7 +143,6 @@ bot.action(/rsi_(\d+)_(\d+)/, async ctx => {
   ctx.answerCbQuery();
 });
 
-// Szybka analiza RSI i TP, z opcją zaawansowanego sygnału
 bot.action(/detail_(.+)_(.+)_(.+)_(LONG|SHORT)/, async ctx => {
   const [symbol, exchange, intervalLabel, direction] = [ctx.match[1], ctx.match[2], ctx.match[3], ctx.match[4]];
   ctx.reply(`Analizuję ${symbol} (${exchange}) na interwale ${intervalLabel}...`);
@@ -173,7 +172,6 @@ bot.action(/detail_(.+)_(.+)_(.+)_(LONG|SHORT)/, async ctx => {
   ctx.answerCbQuery();
 });
 
-// Drugi klik: pełna zaawansowana analiza techniczna + TP
 bot.action(/advanced_(.+)_(.+)_(.+)_(LONG|SHORT)/, async ctx => {
   const [symbol, exchange, intervalLabel, direction] = [ctx.match[1], ctx.match[2], ctx.match[3], ctx.match[4]];
   ctx.reply(`Zaawansowana analiza ${symbol} (${exchange}, ${intervalLabel})...`);
@@ -182,6 +180,7 @@ bot.action(/advanced_(.+)_(.+)_(.+)_(LONG|SHORT)/, async ctx => {
     ctx.reply("Brak świeżych danych do analizy.");
     return ctx.answerCbQuery();
   }
+  // Cała analiza techniczna z wielu wskaźników:
   const rsi = calculateRSI(closes);
   const sma20 = SMA(closes, 20);
   const sma50 = SMA(closes, 50);
@@ -211,7 +210,7 @@ bot.action(/advanced_(.+)_(.+)_(.+)_(LONG|SHORT)/, async ctx => {
   ctx.answerCbQuery();
 });
 
-// Pozostała logika – sam RSI + analiza pełna:
+// SCAN DLA WSZYSTKICH PAR FUTURES DANEJ GIEŁDY
 async function scanRSISignals(exchange, intervalLabel, thresholds) {
   let symbols = [];
   let results = [];
@@ -249,24 +248,21 @@ async function scanRSISignals(exchange, intervalLabel, thresholds) {
           sym === sym.toUpperCase()
         );
     }
-    symbols = symbols.slice(0, MAX_SYMBOLS);
+    symbols = symbols.slice(0, MAX_SYMBOLS); // ogranicz jeśli Railway nie daje rady
     for (const batch of chunkArray(symbols, 10)) {
-      const batchResults = await Promise.race([
-        Promise.all(batch.map(async sym => {
-          try {
-            const closes = await downloadCloses(exchange, sym, intervalLabel, 50);
-            if (!closes || closes.length < 20) return null;
-            const rsi = calculateRSI(closes);
-            if (rsi == null) return null;
-            if (rsi < thresholds.oversold) return { symbol: sym, rsi, type: "🟢 Wyprzedane:" };
-            if (rsi > thresholds.overbought) return { symbol: sym, rsi, type: "🔴 Wykupione:" };
-          } catch(e) { return null; }
-          return null;
-        })),
-        new Promise(res => setTimeout(() => res(Array(batch.length).fill(null)), 9000))
-      ]);
+      const batchResults = await Promise.all(batch.map(async sym => {
+        try {
+          const closes = await downloadCloses(exchange, sym, intervalLabel, 50);
+          if (!closes || closes.length < 20) return null;
+          const rsi = calculateRSI(closes);
+          if (rsi == null) return null;
+          if (rsi < thresholds.oversold) return { symbol: sym, rsi, type: "🟢 Wyprzedane:" };
+          if (rsi > thresholds.overbought) return { symbol: sym, rsi, type: "🔴 Wykupione:" };
+        } catch(e) { return null; }
+        return null;
+      }));
       results = results.concat(batchResults.filter(x=>x));
-      await new Promise(r=>setTimeout(r, 140));
+      await new Promise(r=>setTimeout(r, 130));
     }
     return results;
   } catch (e) {
@@ -301,7 +297,6 @@ async function downloadCloses(exchange, symbol, intervalLabel, limit=50) {
     return null;
   }
 }
-// Pobierz pełne świece (do advanced)
 async function downloadCandles(exchange, symbol, intervalLabel, limit=50) {
   try {
     if (exchange === 'bybit') {
@@ -362,7 +357,7 @@ function calculateRSI(closes) {
   const rs = avgGain / avgLoss;
   return 100 - (100 / (1 + rs));
 }
-
+// ----- Zaawansowane wskaźniki -----
 function SMA(arr, len) {
   if (arr.length < len) return NaN;
   return arr.slice(-len).reduce((a,b)=>a+b,0) / len;
@@ -449,7 +444,6 @@ function trendSummary(closes, sma20, sma50, ema20, macd, bb) {
   if (last < bb.lower) t.push("wyprzedanie");
   return t.join(", ");
 }
-
 function generateChartUrl(symbol) {
   return `https://pl.tradingview.com/chart/?symbol=${symbol.replace('USDT','USDT.P')}`;
 }
