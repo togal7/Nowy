@@ -6,7 +6,7 @@ process.on('uncaughtException', err => { console.error('UNCAUGHT EXCEPTION:', er
 
 const TOKEN = '8067663229:AAEb3__Kn-UhDopgTHkGCdvdfwaZXRzHmig';
 const ADMIN_ID = 5157140630;
-const MAX_SYMBOLS = 50; // możesz podnieść, jeśli Railway daje radę
+const MAX_SYMBOLS = 30; // Możesz zmienić na więcej/mniej w razie potrzeby
 
 const exchanges = [
   { key: 'bybit', label: 'Bybit Perpetual' },
@@ -99,7 +99,6 @@ bot.use((ctx, next) => {
   next();
 });
 
-// WYBÓR GIEŁDY → INTERWAŁ
 bot.action(exchanges.map(e=>e.key), ctx => {
   userConfig[ctx.chat.id] = { exchange: ctx.match[0] };
   ctx.reply('Wybierz interwał:', Markup.keyboard(intervalKeyboard).oneTime().resize());
@@ -144,7 +143,6 @@ bot.action(/rsi_(\d+)_(\d+)/, async ctx => {
   ctx.answerCbQuery();
 });
 
-// SZCZEGÓŁOWA SZYBKA ANALIZA Z TP I PRZYCISKIEM ZAANSOWANEJ ANALIZY
 bot.action(/detail_(.+)_(.+)_(.+)_(LONG|SHORT)/, async ctx => {
   const [symbol, exchange, intervalLabel, direction] = [ctx.match[1], ctx.match[2], ctx.match[3], ctx.match[4]];
   ctx.reply(`Analizuję ${symbol} (${exchange}) na interwale ${intervalLabel} ...`);
@@ -155,62 +153,21 @@ bot.action(/detail_(.+)_(.+)_(.+)_(LONG|SHORT)/, async ctx => {
   }
   const rsi = calculateRSI(closes);
   const levels = detectSupportResistance(closes);
-  const chartUrl = generateChartUrl(symbol, closes, levels);
   const lastClose = closes[closes.length-1];
   const tp = calculateTakeProfit(levels, lastClose, direction);
 
-  let msg = `📊 Sygnał RSI ${symbol} (${exchange.toUpperCase()}, ${intervalLabel})\n`;
+  let msg = `📊 Analiza techniczna ${symbol} (${exchange.toUpperCase()}, ${intervalLabel})\n`;
   msg += `RSI: ${rsi ? rsi.toFixed(2) : "Brak"}\n`;
   msg += `Kierunek sygnału: ${direction === "LONG" ? "Kup (LONG)" : "Sprzedaż (SHORT)"}\n`;
   msg += `Wsparcia: ${levels.support.map(Number).join(', ')}\n`;
   msg += `Opory: ${levels.resistance.map(Number).join(', ')}\n`;
   msg += tp.tpMsg + '\n';
-  msg += `\n[Zobacz wykres](${chartUrl})`;
-  ctx.replyWithMarkdown(msg, Markup.inlineKeyboard([
-    [{ text: "⚡ Zaawansowana analiza", callback_data: `advanced_${symbol}_${exchange}_${intervalLabel}_${direction}` }]
-  ]));
-  ctx.answerCbQuery();
-});
-
-//ZAawansowana analiza na żądanie
-bot.action(/advanced_(.+)_(.+)_(.+)_(LONG|SHORT)/, async ctx => {
-  const [symbol, exchange, intervalLabel, direction] = [ctx.match[1], ctx.match[2], ctx.match[3], ctx.match[4]];
-  ctx.reply(`Zaawansowana analiza ${symbol} (${exchange}, ${intervalLabel})...`);
-  const {closes, highs, lows, volumes} = await downloadCandles(exchange, symbol, intervalLabel, 100);
-  if (!closes || closes.length < 30) {
-    ctx.reply("Brak świeżych danych do analizy.");
-    return ctx.answerCbQuery();
-  }
-  const rsi = calculateRSI(closes);
-  const sma20 = SMA(closes, 20);
-  const sma50 = SMA(closes, 50);
-  const ema20 = EMA(closes, 20);
-  const macd = MACD(closes, 12, 26, 9);
-  const bb = BollingerBands(closes, 20, 2);
-  const levels = detectSupportResistance(closes);
-  const vol = Math.round(volumes.slice(-5).reduce((a,b)=>a+b,0)/5);
-  const trendInfo = trendSummary(closes, sma20, sma50, ema20, macd, bb);
-  const lastClose = closes[closes.length-1];
-  const tp = calculateTakeProfitAll(levels, bb, lastClose, direction);
-
-  let msg = `📊 *Zaawansowany sygnał ${direction === "LONG" ? "Kup (LONG)" : "Sprzedaj (SHORT)"} dla* _${symbol}_\n\n`;
-  msg += `*Cena*: ${lastClose}\n`;
-  msg += `*RSI*: ${rsi ? rsi.toFixed(2) : "Brak"} | *Wolumen*: ${vol}\n`;
-  msg += `*Trend*: ${trendInfo}\n`;
-  msg += `*MACD*: ${macd.hist > 0 ? "➕" : "➖"} (${macd.hist.toFixed(3)})\n`;
-  msg += `*SMA20/SMA50*: ${sma20.toFixed(2)} / ${sma50.toFixed(2)}\n`;
-  msg += `*Bollinger Bands*: [${bb.lower.toFixed(2)} .. ${bb.upper.toFixed(2)}]\n`;
-  msg += `Wsparcia: ${levels.support.map(Number).join(', ')}\n`;
-  msg += `Opory: ${levels.resistance.map(Number).join(', ')}\n`;
-  msg += tp.tpMsg + '\n';
-  msg += levels.signal ? `Sygnał: ${levels.signal}\n` : '';
-  msg += `\n[Zobacz wykres](${generateChartUrl(symbol, closes, levels)})`;
+  msg += `\n[Zobacz wykres](${generateChartUrl(symbol)})`;
   ctx.replyWithMarkdown(msg);
   showMenu(ctx);
   ctx.answerCbQuery();
 });
 
-// -- UTILITIES --
 function calculateTakeProfit(levels, lastClose, direction) {
   let tpMsg = '';
   if (direction === "LONG") {
@@ -234,163 +191,99 @@ function calculateTakeProfit(levels, lastClose, direction) {
   }
   return { tpMsg };
 }
-function calculateTakeProfitAll(levels, bb, lastClose, direction) {
-  let tpMsg = '';
-  if (direction === "LONG") {
-    const opors = levels.resistance.filter(r=>r>lastClose).sort((a,b)=>a-b);
-    if (opors.length) {
-      const tp = Math.min(opors[0], bb.upper);
-      tpMsg = `🎯 TP: ${tp.toFixed(4)} (+${((tp/lastClose-1)*100).toFixed(2)}%), najbliższy opór/Bollinger.`;
-    } else {
-      const tp = Math.max(lastClose*1.02, bb.upper);
-      tpMsg = `🎯 TP: ${tp.toFixed(4)} (BB upper lub +2%)`;
-    }
-  } else {
-    const wsparc = levels.support.filter(s=>s<lastClose).sort((a,b)=>b-a);
-    if (wsparc.length) {
-      const tp = Math.max(wsparc[0], bb.lower);
-      tpMsg = `🎯 TP: ${tp.toFixed(4)} (${((tp/lastClose-1)*100).toFixed(2)}%), najbliższe wsparcie/BB lower.`;
-    } else {
-      const tp = Math.min(lastClose*0.98, bb.lower);
-      tpMsg = `🎯 TP: ${tp.toFixed(4)} (BB lower lub -2%)`;
-    }
+
+async function scanRSISignals(exchange, intervalLabel, thresholds) {
+  let symbols = [];
+  let results = [];
+  function chunkArray(arr, size) {
+    const res = [];
+    for (let i=0; i<arr.length; i+=size) res.push(arr.slice(i,i+size));
+    return res;
   }
-  return { tpMsg };
-}
-function SMA(arr, len) {
-  if (arr.length < len) return NaN;
-  return arr.slice(-len).reduce((a,b)=>a+b,0) / len;
-}
-function EMA(values, period) {
-  let k = 2 / (period + 1);
-  let ema = values[0];
-  for (let i = 1; i < values.length; i++) {
-    ema = values[i] * k + ema * (1 - k);
-  }
-  return ema;
-}
-function MACD(values, fast=12, slow=26, signal=9) {
-  if (values.length < slow+signal) return {macd:0, signal:0, hist:0};
-  const emaFast = [];
-  const emaSlow = [];
-  let kFast = 2/(fast+1), kSlow = 2/(slow+1);
-  emaFast[0]=values[0]; emaSlow[0]=values[0];
-  for(let i=1; i<values.length; ++i){
-    emaFast[i] = values[i]*kFast + emaFast[i-1]*(1-kFast);
-    emaSlow[i] = values[i]*kSlow + emaSlow[i-1]*(1-kSlow);
-  }
-  const macdLine = emaFast.map((e,i)=>e-emaSlow[i]);
-  let sig = macdLine.slice(0,signal).reduce((a,b)=>a+b,0)/signal;
-  for(let i=signal;i<macdLine.length;i++) sig = macdLine[i]*kFast + sig*(1-kFast);
-  return { macd: macdLine.at(-1), signal: sig, hist: macdLine.at(-1)-sig };
-}
-function BollingerBands(arr, length=20, mult=2) {
-  if (arr.length < length) return {middle:NaN, upper:NaN, lower:NaN};
-  let mean = arr.slice(-length).reduce((a,b)=>a+b,0)/length;
-  let variance = arr.slice(-length).reduce((a,b)=>a+(b-mean)**2,0)/length;
-  let std = Math.sqrt(variance);
-  return {middle:mean, upper:mean + std*mult, lower: mean - std*mult, std:std};
-}
-function trendSummary(closes, sma20, sma50, ema20, macd, bb) {
-  const last = closes.at(-1);
-  let t = [];
-  if (last > sma20 && sma20 > sma50) t.push("silny wzrostowy");
-  else if (last < sma20 && sma20 < sma50) t.push("silny spadkowy");
-  else t.push("konsolidacja");
-  if (last > ema20) t.push("momentum up");
-  if (last < ema20) t.push("momentum down");
-  if (macd.hist > 0) t.push("przewaga byków");
-  if (macd.hist < 0) t.push("przewaga niedźwiedzi");
-  if (last > bb.upper) t.push("skrajna wycena");
-  if (last < bb.lower) t.push("wyprzedanie");
-  return t.join(", ");
-}
-function detectSupportResistance(closes) {
-  let support = [], resistance = [];
-  for (let i = 2; i < closes.length - 2; i++) {
-    if (closes[i] < closes[i - 1] && closes[i] < closes[i - 2] && closes[i] < closes[i + 1] && closes[i] < closes[i + 2]) {
-      support.push(closes[i]);
-    }
-    if (closes[i] > closes[i - 1] && closes[i] > closes[i - 2] && closes[i] > closes[i + 1] && closes[i] > closes[i + 2]) {
-      resistance.push(closes[i]);
-    }
-  }
-  let signal = null;
-  if (support.length > 0 && closes[closes.length-1] > support[support.length-1]) signal = "LONG/odbicie od wsparcia";
-  if (resistance.length > 0 && closes[closes.length-1] < resistance[resistance.length-1]) signal = "SHORT/przebicie oporu";
-  return { support: support.slice(-3), resistance: resistance.slice(-3), signal };
-}
-async function downloadCloses(exchange, symbol, intervalLabel) {
   try {
     if (exchange === 'bybit') {
-      const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${bybitIntervalMap[intervalLabel]}&limit=50`;
-      const resp = await axios.get(url);
-      if (!resp.data.result || !resp.data.result.list || resp.data.result.list.length < 15) return null;
-      return resp.data.result.list.map(k => parseFloat(k[4]));
+      const s = await axios.get('https://api.bybit.com/v5/market/instruments-info?category=linear');
+      symbols = s.data.result.list.filter(x =>
+        x.status === 'Trading' && x.symbol.endsWith('USDT'))
+        .map(x => x.symbol);
     } else if (exchange === 'binance') {
-      const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${binanceIntervalMap[intervalLabel]}&limit=50`;
-      const resp = await axios.get(url);
-      if (!Array.isArray(resp.data) || resp.data.length < 15) return null;
-      return resp.data.map(k => parseFloat(k[4]));
+      const s = await axios.get('https://fapi.binance.com/fapi/v1/exchangeInfo');
+      symbols = s.data.symbols.filter(x =>
+        x.status === 'TRADING' && x.symbol.endsWith('USDT'))
+        .map(x => x.symbol);
     } else if (exchange === 'mexc') {
-      const url = `https://contract.mexc.com/api/v1/contract/kline/${symbol}?interval=${mexcIntervalMap[intervalLabel]}&limit=50`;
+      const s = await axios.get('https://contract.mexc.com/api/v1/contract/detail');
+      symbols = s.data.data
+        .filter(x =>
+          x.quoteCoin === 'USDT' &&
+          (
+            !x.state || x.state === 'ENABLED' || x.state === '1' || x.state === '2'
+          ) &&
+          (
+            !x.status || x.status === 'listed' || x.status === 'TRADING' || x.status === 'open'
+          )
+        )
+        .map(x => x.symbol)
+        .filter(sym =>
+          !sym.includes('STOCK') &&
+          !sym.includes('ETF') &&
+          !sym.includes('INDEX') &&
+          !sym.includes('LIVE') &&
+          sym.endsWith('USDT') &&
+          sym === sym.toUpperCase()
+        );
+    }
+    symbols = symbols.slice(0, MAX_SYMBOLS);
+    console.log(`[DEBUG] Skanuję ${symbols.length} symboli na ${exchange} (${intervalLabel})`);
+    for (const batch of chunkArray(symbols, 5)) {
+      const batchResults = await Promise.all(batch.map(async sym => {
+        try {
+          const closes = await downloadCloses(exchange, sym, intervalLabel, 50);
+          console.log(`[DEBUG] ${exchange}.${sym} closes: ${closes ? closes.length : 0}, closeArr:`, closes);
+          if (!closes || closes.length < 15) return null;
+          const rsi = calculateRSI(closes);
+          console.log(`[DEBUG-RSI] ${exchange}.${sym} RSI: ${rsi}`);
+          if (rsi == null) return null;
+          if (rsi < thresholds.oversold) return { symbol: sym, rsi, type: "🟢 Wyprzedane:" };
+          if (rsi > thresholds.overbought) return { symbol: sym, rsi, type: "🔴 Wykupione:" };
+        } catch(e) { return null; }
+        return null;
+      }));
+      results = results.concat(batchResults.filter(x=>x));
+      await new Promise(r=>setTimeout(r, 120));
+    }
+    return results;
+  } catch (e) {
+    console.log('Błąd globalny scanRSISignals:', e.message);
+    return [];
+  }
+}
+
+async function downloadCloses(exchange, symbol, intervalLabel, limit=50) {
+  try {
+    if (exchange === 'bybit') {
+      const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${bybitIntervalMap[intervalLabel]}&limit=${limit}`;
       const resp = await axios.get(url);
-      if (Array.isArray(resp.data.data) && resp.data.data.length >= 15) {
-        return resp.data.data.map(k => parseFloat(k[4]));
-      } else if (resp.data.data && Array.isArray(resp.data.data.close) && resp.data.data.close.length >= 15) {
-        return resp.data.data.close.slice(-15).map(Number);
+      if (!resp.data.result || !resp.data.result.list || resp.data.result.list.length < 10) return null;
+      return resp.data.result.list.map(arr=>parseFloat(arr[4]));
+    } else if (exchange === 'binance') {
+      const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${binanceIntervalMap[intervalLabel]}&limit=${limit}`;
+      const resp = await axios.get(url);
+      if (!Array.isArray(resp.data) || resp.data.length < 10) return null;
+      return resp.data.map(x=>parseFloat(x[4]));
+    } else if (exchange === 'mexc') {
+      const url = `https://contract.mexc.com/api/v1/contract/kline/${symbol}?interval=${mexcIntervalMap[intervalLabel]}&limit=${limit}`;
+      const resp = await axios.get(url);
+      if (Array.isArray(resp.data.data) && resp.data.data.length >= 10) {
+        return resp.data.data.map(x=>parseFloat(x[4]));
+      } else if (resp.data.data && Array.isArray(resp.data.data.close) && resp.data.data.close.length >= 10) {
+        return resp.data.data.close.slice(-10).map(Number);
       }
     }
     return null;
   } catch {
     return null;
   }
-}
-async function downloadCandles(exchange, symbol, intervalLabel, limit=50) {
-  try {
-    if (exchange === 'bybit') {
-      const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${bybitIntervalMap[intervalLabel]}&limit=${limit}`;
-      const resp = await axios.get(url);
-      if (!resp.data.result || !resp.data.result.list || resp.data.result.list.length < 10) return {};
-      const parsed = resp.data.result.list.map(arr=>({
-        open:parseFloat(arr[1]),
-        high:parseFloat(arr[2]),
-        low:parseFloat(arr[3]),
-        close:parseFloat(arr[4]),
-        volume:parseFloat(arr[5])
-      }));
-      return {
-        closes: parsed.map(x=>x.close),
-        highs: parsed.map(x=>x.high),
-        lows: parsed.map(x=>x.low),
-        volumes: parsed.map(x=>x.volume)
-      };
-    } else if (exchange === 'binance') {
-      const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${binanceIntervalMap[intervalLabel]}&limit=${limit}`;
-      const resp = await axios.get(url);
-      if (!Array.isArray(resp.data) || resp.data.length < 10) return {};
-      return {
-        closes: resp.data.map(x=>parseFloat(x[4])),
-        highs: resp.data.map(x=>parseFloat(x[2])),
-        lows: resp.data.map(x=>parseFloat(x[3])),
-        volumes: resp.data.map(x=>parseFloat(x[5]))
-      };
-    } else if (exchange === 'mexc') {
-      const url = `https://contract.mexc.com/api/v1/contract/kline/${symbol}?interval=${mexcIntervalMap[intervalLabel]}&limit=${limit}`;
-      const resp = await axios.get(url);
-      if (Array.isArray(resp.data.data) && resp.data.data.length >= 10) {
-        return {
-          closes: resp.data.data.map(x=>parseFloat(x[4])),
-          highs: resp.data.data.map(x=>parseFloat(x[2])),
-          lows: resp.data.data.map(x=>parseFloat(x[3])),
-          volumes: resp.data.data.map(x=>parseFloat(x[5]))
-        };
-      } else if (resp.data.data && Array.isArray(resp.data.data.close) && resp.data.data.close.length >= 10) {
-        return { closes: resp.data.data.close.slice(-10).map(Number), highs:[], lows:[], volumes:[] };
-      }
-    }
-    return {};
-  } catch { return {}; }
 }
 
 function calculateRSI(closes) {
@@ -406,6 +299,20 @@ function calculateRSI(closes) {
   const rs = avgGain / avgLoss;
   return 100 - (100 / (1 + rs));
 }
+
+function detectSupportResistance(closes) {
+  let support = [], resistance = [];
+  for (let i = 2; i < closes.length - 2; i++) {
+    if (closes[i] < closes[i - 1] && closes[i] < closes[i - 2] && closes[i] < closes[i + 1] && closes[i] < closes[i + 2]) {
+      support.push(closes[i]);
+    }
+    if (closes[i] > closes[i - 1] && closes[i] > closes[i - 2] && closes[i] > closes[i + 1] && closes[i] > closes[i + 2]) {
+      resistance.push(closes[i]);
+    }
+  }
+  return { support: support.slice(-3), resistance: resistance.slice(-3), signal: null };
+}
+
 function generateChartUrl(symbol) {
   return `https://pl.tradingview.com/chart/?symbol=${symbol.replace('USDT','USDT.P')}`;
 }
