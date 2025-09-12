@@ -1,12 +1,12 @@
 const { Telegraf, Markup } = require('telegraf');
 const axios = require('axios');
 
+// GLOBALNE CATCHERY dla Railway
 process.on('unhandledRejection', err => { console.error('UNHANDLED REJECTION:', err); });
 process.on('uncaughtException', err => { console.error('UNCAUGHT EXCEPTION:', err); });
 
 const TOKEN = '8067663229:AAEb3__Kn-UhDopgTHkGCdvdfwaZXRzHmig';
 const ADMIN_ID = 5157140630;
-const MAX_SYMBOLS = 30; // Możesz zmienić na więcej/mniej w razie potrzeby
 
 const exchanges = [
   { key: 'bybit', label: 'Bybit Perpetual' },
@@ -99,17 +99,21 @@ bot.use((ctx, next) => {
   next();
 });
 
+// WYBÓR GIEŁDY → INTERWAŁ
 bot.action(exchanges.map(e=>e.key), ctx => {
   userConfig[ctx.chat.id] = { exchange: ctx.match[0] };
   ctx.reply('Wybierz interwał:', Markup.keyboard(intervalKeyboard).oneTime().resize());
   ctx.answerCbQuery();
 });
+
+// WYBÓR INTERWAŁU → PROG RSI
 bot.hears(['1 min','5 min','15 min','30 min','1 godz','4 godz','1 dzień','1 tydzień','1 miesiąc'], ctx => {
   userConfig[ctx.chat.id] = userConfig[ctx.chat.id] || {};
   userConfig[ctx.chat.id].interval = ctx.message.text;
   ctx.reply('Wybierz próg RSI:', Markup.inlineKeyboard(rsiThresholds));
 });
 
+// WYBÓR PROGU RSI → WYNIKI RSI (każda linia to cały przycisk)
 bot.action(/rsi_(\d+)_(\d+)/, async ctx => {
   const chatId = ctx.chat.id;
   userConfig[chatId] = userConfig[chatId] || {};
@@ -143,6 +147,7 @@ bot.action(/rsi_(\d+)_(\d+)/, async ctx => {
   ctx.answerCbQuery();
 });
 
+// SZCZEGÓŁOWA ANALIZA Z TP
 bot.action(/detail_(.+)_(.+)_(.+)_(LONG|SHORT)/, async ctx => {
   const [symbol, exchange, intervalLabel, direction] = [ctx.match[1], ctx.match[2], ctx.match[3], ctx.match[4]];
   ctx.reply(`Analizuję ${symbol} (${exchange}) na interwale ${intervalLabel} ...`);
@@ -153,6 +158,8 @@ bot.action(/detail_(.+)_(.+)_(.+)_(LONG|SHORT)/, async ctx => {
   }
   const rsi = calculateRSI(closes);
   const levels = detectSupportResistance(closes);
+  const news = await fetchLatestNews(symbol);
+  const chartUrl = generateChartUrl(symbol, closes, levels);
   const lastClose = closes[closes.length-1];
   const tp = calculateTakeProfit(levels, lastClose, direction);
 
@@ -162,15 +169,19 @@ bot.action(/detail_(.+)_(.+)_(.+)_(LONG|SHORT)/, async ctx => {
   msg += `Wsparcia: ${levels.support.map(Number).join(', ')}\n`;
   msg += `Opory: ${levels.resistance.map(Number).join(', ')}\n`;
   msg += tp.tpMsg + '\n';
-  msg += `\n[Zobacz wykres](${generateChartUrl(symbol)})`;
+  msg += levels.signal ? `Sygnał: ${levels.signal}\n` : '';
+  if (news) msg += `\n📰 Najnowsze newsy:\n${news.join('\n')}\n`;
+  msg += `\n[Zobacz wykres](${chartUrl})`;
   ctx.replyWithMarkdown(msg);
   showMenu(ctx);
   ctx.answerCbQuery();
 });
 
+// WYZNACZANIE TP
 function calculateTakeProfit(levels, lastClose, direction) {
   let tpMsg = '';
   if (direction === "LONG") {
+    // TP = najbliższy opór powyżej zamknięcia
     const possible = levels.resistance.filter(res => res > lastClose).sort((a,b)=>a-b);
     if (possible.length) {
       const tp = possible[0];
@@ -180,6 +191,7 @@ function calculateTakeProfit(levels, lastClose, direction) {
       tpMsg = `🎯 Sugerowany TP: ${tp.toFixed(4)} (+2%, brak wyraźnego oporu powyżej)`;
     }
   } else {
+    // TP = najbliższe wsparcie poniżej zamknięcia
     const possible = levels.support.filter(sup => sup < lastClose).sort((a,b)=>b-a);
     if (possible.length) {
       const tp = possible[0];
@@ -192,12 +204,14 @@ function calculateTakeProfit(levels, lastClose, direction) {
   return { tpMsg };
 }
 
+// --- POZOSTAŁA LOGIKA BEZ ZMIAN ---
+
 async function scanRSISignals(exchange, intervalLabel, thresholds) {
   let symbols = [];
   let results = [];
   function chunkArray(arr, size) {
     const res = [];
-    for (let i=0; i<arr.length; i+=size) res.push(arr.slice(i,i+size));
+    for (let i=0; i<arr.length; i+=size) res.push(arr.slice(i, i+size));
     return res;
   }
   try {
@@ -233,16 +247,12 @@ async function scanRSISignals(exchange, intervalLabel, thresholds) {
           sym === sym.toUpperCase()
         );
     }
-    symbols = symbols.slice(0, MAX_SYMBOLS);
-    console.log(`[DEBUG] Skanuję ${symbols.length} symboli na ${exchange} (${intervalLabel})`);
-    for (const batch of chunkArray(symbols, 5)) {
+    for (const batch of chunkArray(symbols, 10)) {
       const batchResults = await Promise.all(batch.map(async sym => {
         try {
-          const closes = await downloadCloses(exchange, sym, intervalLabel, 50);
-          console.log(`[DEBUG] ${exchange}.${sym} closes: ${closes ? closes.length : 0}, closeArr:`, closes);
+          const closes = await downloadCloses(exchange, sym, intervalLabel);
           if (!closes || closes.length < 15) return null;
           const rsi = calculateRSI(closes);
-          console.log(`[DEBUG-RSI] ${exchange}.${sym} RSI: ${rsi}`);
           if (rsi == null) return null;
           if (rsi < thresholds.oversold) return { symbol: sym, rsi, type: "🟢 Wyprzedane:" };
           if (rsi > thresholds.overbought) return { symbol: sym, rsi, type: "🔴 Wykupione:" };
@@ -250,7 +260,7 @@ async function scanRSISignals(exchange, intervalLabel, thresholds) {
         return null;
       }));
       results = results.concat(batchResults.filter(x=>x));
-      await new Promise(r=>setTimeout(r, 120));
+      await new Promise(r=>setTimeout(r, 140));
     }
     return results;
   } catch (e) {
@@ -259,25 +269,25 @@ async function scanRSISignals(exchange, intervalLabel, thresholds) {
   }
 }
 
-async function downloadCloses(exchange, symbol, intervalLabel, limit=50) {
+async function downloadCloses(exchange, symbol, intervalLabel) {
   try {
     if (exchange === 'bybit') {
-      const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${bybitIntervalMap[intervalLabel]}&limit=${limit}`;
+      const url = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=${bybitIntervalMap[intervalLabel]}&limit=50`;
       const resp = await axios.get(url);
-      if (!resp.data.result || !resp.data.result.list || resp.data.result.list.length < 10) return null;
-      return resp.data.result.list.map(arr=>parseFloat(arr[4]));
+      if (!resp.data.result || !resp.data.result.list || resp.data.result.list.length < 15) return null;
+      return resp.data.result.list.map(k => parseFloat(k[4]));
     } else if (exchange === 'binance') {
-      const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${binanceIntervalMap[intervalLabel]}&limit=${limit}`;
+      const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=${binanceIntervalMap[intervalLabel]}&limit=50`;
       const resp = await axios.get(url);
-      if (!Array.isArray(resp.data) || resp.data.length < 10) return null;
-      return resp.data.map(x=>parseFloat(x[4]));
+      if (!Array.isArray(resp.data) || resp.data.length < 15) return null;
+      return resp.data.map(k => parseFloat(k[4]));
     } else if (exchange === 'mexc') {
-      const url = `https://contract.mexc.com/api/v1/contract/kline/${symbol}?interval=${mexcIntervalMap[intervalLabel]}&limit=${limit}`;
+      const url = `https://contract.mexc.com/api/v1/contract/kline/${symbol}?interval=${mexcIntervalMap[intervalLabel]}&limit=50`;
       const resp = await axios.get(url);
-      if (Array.isArray(resp.data.data) && resp.data.data.length >= 10) {
-        return resp.data.data.map(x=>parseFloat(x[4]));
-      } else if (resp.data.data && Array.isArray(resp.data.data.close) && resp.data.data.close.length >= 10) {
-        return resp.data.data.close.slice(-10).map(Number);
+      if (Array.isArray(resp.data.data) && resp.data.data.length >= 15) {
+        return resp.data.data.map(k => parseFloat(k[4]));
+      } else if (resp.data.data && Array.isArray(resp.data.data.close) && resp.data.data.close.length >= 15) {
+        return resp.data.data.close.slice(-15).map(Number);
       }
     }
     return null;
@@ -310,10 +320,24 @@ function detectSupportResistance(closes) {
       resistance.push(closes[i]);
     }
   }
-  return { support: support.slice(-3), resistance: resistance.slice(-3), signal: null };
+  let signal = null;
+  if (support.length > 0 && closes[closes.length-1] > support[support.length-1]) signal = "LONG/odbicie od wsparcia";
+  if (resistance.length > 0 && closes[closes.length-1] < resistance[resistance.length-1]) signal = "SHORT/przebicie oporu";
+  return { support: support.slice(-3), resistance: resistance.slice(-3), signal };
 }
 
-function generateChartUrl(symbol) {
+async function fetchLatestNews(symbol) {
+  try {
+    const resp = await axios.get(`https://newsapi.org/v2/everything`, {
+      params: { q: symbol.replace('USDT',''), pageSize: 3, apiKey: 'demo' }
+    });
+    return resp.data.articles.slice(0, 3).map(news => `${news.title} (${news.source.name})`);
+  } catch {
+    return [`Brak najnowszych newsów lub błąd API.`];
+  }
+}
+
+function generateChartUrl(symbol, closes, levels) {
   return `https://pl.tradingview.com/chart/?symbol=${symbol.replace('USDT','USDT.P')}`;
 }
 
