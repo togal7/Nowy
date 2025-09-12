@@ -1,7 +1,7 @@
 const { Telegraf, Markup } = require('telegraf');
 const axios = require('axios');
 
-// GLOBALNE CATCHERY dla Railway
+// Handlery globalnych błędów
 process.on('unhandledRejection', err => { console.error('UNHANDLED REJECTION:', err); });
 process.on('uncaughtException', err => { console.error('UNCAUGHT EXCEPTION:', err); });
 
@@ -101,7 +101,7 @@ bot.use((ctx, next) => {
 
 // WYBÓR GIEŁDY → INTERWAŁ
 bot.action(exchanges.map(e=>e.key), ctx => {
-  userConfig[ctx.chat.id] = { exchange: ctx.match[0] };
+  userConfig[ctx.chat.id] = { exchange: ctx.match };
   ctx.reply('Wybierz interwał:', Markup.keyboard(intervalKeyboard).oneTime().resize());
   ctx.answerCbQuery();
 });
@@ -116,7 +116,7 @@ bot.action(/rsi_(\d+)_(\d+)/, async ctx => {
   const chatId = ctx.chat.id;
   userConfig[chatId] = userConfig[chatId] || {};
   userConfig[chatId].overbought = parseInt(ctx.match[1]);
-  userConfig[chatId].oversold = parseInt(ctx.match[2]);
+  userConfig[chatId].oversold = parseInt(ctx.match);
   const exchange = userConfig[chatId].exchange || 'mexc';
   const intervalLabel = userConfig[chatId].interval || '1 godz';
   ctx.reply(`Skanuję RSI (${exchange.toUpperCase()}) >${userConfig[chatId].overbought} / <${userConfig[chatId].oversold} (${intervalLabel})...`);
@@ -145,9 +145,9 @@ bot.action(/rsi_(\d+)_(\d+)/, async ctx => {
   ctx.answerCbQuery();
 });
 
-// SZCZEGÓŁOWA ANALIZA Z TP I WSZYSTKIMI DANYMI
+// Szczegóły: pełna analiza dla wybranej pary
 bot.action(/detail_(.+)_(.+)_(.+)_(LONG|SHORT)/, async ctx => {
-  const [symbol, exchange, intervalLabel, direction] = [ctx.match[1], ctx.match[2], ctx.match[3], ctx.match[4]];
+  const [symbol, exchange, intervalLabel, direction] = [ctx.match[1], ctx.match, ctx.match, ctx.match];
   ctx.reply(`Analizuję ${symbol} (${exchange}) na interwale ${intervalLabel} ...`);
   const {closes, highs, lows, volumes} = await downloadCandles(exchange, symbol, intervalLabel, 100);
   if (!closes || closes.length < 30) {
@@ -183,7 +183,7 @@ bot.action(/detail_(.+)_(.+)_(.+)_(LONG|SHORT)/, async ctx => {
   ctx.answerCbQuery();
 });
 
-// --- Technicals (MA, MACD, BB, wolumen) ---
+// --- Technicals ---
 
 function SMA(arr, len) {
   if (arr.length < len) return NaN;
@@ -191,7 +191,7 @@ function SMA(arr, len) {
 }
 function EMA(values, period) {
   let k = 2 / (period + 1);
-  let ema = values[0];
+  let ema = values;
   for (let i = 1; i < values.length; i++) {
     ema = values[i] * k + ema * (1 - k);
   }
@@ -202,7 +202,7 @@ function MACD(values, fast=12, slow=26, signal=9) {
   const emaFast = [];
   const emaSlow = [];
   let kFast = 2/(fast+1), kSlow = 2/(slow+1);
-  emaFast[0]=values[0]; emaSlow[0]=values[0];
+  emaFast=values; emaSlow=values;
   for(let i=1; i<values.length; ++i){
     emaFast[i] = values[i]*kFast + emaFast[i-1]*(1-kFast);
     emaSlow[i] = values[i]*kSlow + emaSlow[i-1]*(1-kSlow);
@@ -219,13 +219,12 @@ function BollingerBands(arr, length=20, mult=2) {
   let std = Math.sqrt(variance);
   return {middle:mean, upper:mean + std*mult, lower: mean - std*mult, std:std};
 }
-// --- Pełne wyznaczanie TP z kontekstem
 function calculateTakeProfitAll(levels, bb, lastClose, direction) {
   let tpMsg = '';
   if (direction === "LONG") {
     const opors = levels.resistance.filter(r=>r>lastClose).sort((a,b)=>a-b);
     if (opors.length) {
-      const tp = Math.min(opors[0], bb.upper);
+      const tp = Math.min(opors, bb.upper);
       tpMsg = `🎯 TP: ${tp.toFixed(4)} (+${((tp/lastClose-1)*100).toFixed(2)}%), najbliższy opór/Bollinger.`;
     } else {
       const tp = Math.max(lastClose*1.02, bb.upper);
@@ -234,7 +233,7 @@ function calculateTakeProfitAll(levels, bb, lastClose, direction) {
   } else {
     const wsparc = levels.support.filter(s=>s<lastClose).sort((a,b)=>b-a);
     if (wsparc.length) {
-      const tp = Math.max(wsparc[0], bb.lower);
+      const tp = Math.max(wsparc, bb.lower);
       tpMsg = `🎯 TP: ${tp.toFixed(4)} (${((tp/lastClose-1)*100).toFixed(2)}%), najbliższe wsparcie/BB lower.`;
     } else {
       const tp = Math.min(lastClose*0.98, bb.lower);
@@ -259,15 +258,10 @@ function trendSummary(closes, sma20, sma50, ema20, macd, bb) {
   return t.join(", ");
 }
 
-// --- Pozostała logika (skanowanie RSI, wsparcie/opór, pobieranie świec etc.) ---
 async function scanRSISignals(exchange, intervalLabel, thresholds) {
   let symbols = [];
   let results = [];
-  function chunkArray(arr, size) {
-    const res = [];
-    for (let i=0; i<arr.length; i+=size) res.push(arr.slice(i, i+size));
-    return res;
-  }
+  function chunkArray(arr, size) { const res=[]; for(let i=0;i<arr.length;i+=size) res.push(arr.slice(i,i+size)); return res; }
   try {
     if (exchange === 'bybit') {
       const s = await axios.get('https://api.bybit.com/v5/market/instruments-info?category=linear');
@@ -301,6 +295,8 @@ async function scanRSISignals(exchange, intervalLabel, thresholds) {
           sym === sym.toUpperCase()
         );
     }
+    // Szybszy test: ogranicz na chwilę do top 30
+    // symbols = symbols.slice(0, 30);
     for (const batch of chunkArray(symbols, 10)) {
       const batchResults = await Promise.all(batch.map(async sym => {
         try {
@@ -323,7 +319,6 @@ async function scanRSISignals(exchange, intervalLabel, thresholds) {
   }
 }
 
-// Funkcja pobiera kilka typów danych ze świecy.
 async function downloadCandles(exchange, symbol, intervalLabel, limit=50) {
   try {
     if (exchange === 'bybit') {
@@ -332,10 +327,10 @@ async function downloadCandles(exchange, symbol, intervalLabel, limit=50) {
       if (!resp.data.result || !resp.data.result.list || resp.data.result.list.length < 10) return {};
       const parsed = resp.data.result.list.map(arr=>({
         open:parseFloat(arr[1]),
-        high:parseFloat(arr[2]),
-        low:parseFloat(arr[3]),
-        close:parseFloat(arr[4]),
-        volume:parseFloat(arr[5])
+        high:parseFloat(arr),
+        low:parseFloat(arr),
+        close:parseFloat(arr),
+        volume:parseFloat(arr)
       }));
       return {
         closes: parsed.map(x=>x.close),
@@ -348,23 +343,22 @@ async function downloadCandles(exchange, symbol, intervalLabel, limit=50) {
       const resp = await axios.get(url);
       if (!Array.isArray(resp.data) || resp.data.length < 10) return {};
       return {
-        closes: resp.data.map(x=>parseFloat(x[4])),
-        highs: resp.data.map(x=>parseFloat(x[2])),
-        lows: resp.data.map(x=>parseFloat(x[3])),
-        volumes: resp.data.map(x=>parseFloat(x[5]))
+        closes: resp.data.map(x=>parseFloat(x)),
+        highs: resp.data.map(x=>parseFloat(x)),
+        lows: resp.data.map(x=>parseFloat(x)),
+        volumes: resp.data.map(x=>parseFloat(x))
       };
     } else if (exchange === 'mexc') {
       const url = `https://contract.mexc.com/api/v1/contract/kline/${symbol}?interval=${mexcIntervalMap[intervalLabel]}&limit=${limit}`;
       const resp = await axios.get(url);
       if (Array.isArray(resp.data.data) && resp.data.data.length >= 10) {
         return {
-          closes: resp.data.data.map(x=>parseFloat(x[4])),
-          highs: resp.data.data.map(x=>parseFloat(x[2])),
-          lows: resp.data.data.map(x=>parseFloat(x[3])),
-          volumes: resp.data.data.map(x=>parseFloat(x[5]))
+          closes: resp.data.data.map(x=>parseFloat(x)),
+          highs: resp.data.data.map(x=>parseFloat(x)),
+          lows: resp.data.data.map(x=>parseFloat(x)),
+          volumes: resp.data.data.map(x=>parseFloat(x))
         };
       } else if (resp.data.data && Array.isArray(resp.data.data.close) && resp.data.data.close.length >= 10) {
-        // fallback
         return { closes: resp.data.data.close.slice(-10).map(Number), highs:[], lows:[], volumes:[] };
       }
     }
