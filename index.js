@@ -1,12 +1,12 @@
 const { Telegraf, Markup } = require('telegraf');
 const axios = require('axios');
 
-// Handlery globalnych błędów
 process.on('unhandledRejection', err => { console.error('UNHANDLED REJECTION:', err); });
 process.on('uncaughtException', err => { console.error('UNCAUGHT EXCEPTION:', err); });
 
 const TOKEN = '8067663229:AAEb3__Kn-UhDopgTHkGCdvdfwaZXRzHmig';
 const ADMIN_ID = 5157140630;
+const MAX_SYMBOLS = 20; // Podnieś jeśli testy przejdą OK
 
 const exchanges = [
   { key: 'bybit', label: 'Bybit Perpetual' },
@@ -101,7 +101,7 @@ bot.use((ctx, next) => {
 
 // WYBÓR GIEŁDY → INTERWAŁ
 bot.action(exchanges.map(e=>e.key), ctx => {
-  userConfig[ctx.chat.id] = { exchange: ctx.match };
+  userConfig[ctx.chat.id] = { exchange: ctx.match[0] };
   ctx.reply('Wybierz interwał:', Markup.keyboard(intervalKeyboard).oneTime().resize());
   ctx.answerCbQuery();
 });
@@ -116,7 +116,7 @@ bot.action(/rsi_(\d+)_(\d+)/, async ctx => {
   const chatId = ctx.chat.id;
   userConfig[chatId] = userConfig[chatId] || {};
   userConfig[chatId].overbought = parseInt(ctx.match[1]);
-  userConfig[chatId].oversold = parseInt(ctx.match);
+  userConfig[chatId].oversold = parseInt(ctx.match[2]);
   const exchange = userConfig[chatId].exchange || 'mexc';
   const intervalLabel = userConfig[chatId].interval || '1 godz';
   ctx.reply(`Skanuję RSI (${exchange.toUpperCase()}) >${userConfig[chatId].overbought} / <${userConfig[chatId].oversold} (${intervalLabel})...`);
@@ -145,9 +145,8 @@ bot.action(/rsi_(\d+)_(\d+)/, async ctx => {
   ctx.answerCbQuery();
 });
 
-// Szczegóły: pełna analiza dla wybranej pary
 bot.action(/detail_(.+)_(.+)_(.+)_(LONG|SHORT)/, async ctx => {
-  const [symbol, exchange, intervalLabel, direction] = [ctx.match[1], ctx.match, ctx.match, ctx.match];
+  const [symbol, exchange, intervalLabel, direction] = [ctx.match[1], ctx.match[2], ctx.match[3], ctx.match[4]];
   ctx.reply(`Analizuję ${symbol} (${exchange}) na interwale ${intervalLabel} ...`);
   const {closes, highs, lows, volumes} = await downloadCandles(exchange, symbol, intervalLabel, 100);
   if (!closes || closes.length < 30) {
@@ -184,14 +183,13 @@ bot.action(/detail_(.+)_(.+)_(.+)_(LONG|SHORT)/, async ctx => {
 });
 
 // --- Technicals ---
-
 function SMA(arr, len) {
   if (arr.length < len) return NaN;
   return arr.slice(-len).reduce((a,b)=>a+b,0) / len;
 }
 function EMA(values, period) {
   let k = 2 / (period + 1);
-  let ema = values;
+  let ema = values[0];
   for (let i = 1; i < values.length; i++) {
     ema = values[i] * k + ema * (1 - k);
   }
@@ -202,7 +200,7 @@ function MACD(values, fast=12, slow=26, signal=9) {
   const emaFast = [];
   const emaSlow = [];
   let kFast = 2/(fast+1), kSlow = 2/(slow+1);
-  emaFast=values; emaSlow=values;
+  emaFast[0]=values[0]; emaSlow[0]=values[0];
   for(let i=1; i<values.length; ++i){
     emaFast[i] = values[i]*kFast + emaFast[i-1]*(1-kFast);
     emaSlow[i] = values[i]*kSlow + emaSlow[i-1]*(1-kSlow);
@@ -224,7 +222,7 @@ function calculateTakeProfitAll(levels, bb, lastClose, direction) {
   if (direction === "LONG") {
     const opors = levels.resistance.filter(r=>r>lastClose).sort((a,b)=>a-b);
     if (opors.length) {
-      const tp = Math.min(opors, bb.upper);
+      const tp = Math.min(opors[0], bb.upper);
       tpMsg = `🎯 TP: ${tp.toFixed(4)} (+${((tp/lastClose-1)*100).toFixed(2)}%), najbliższy opór/Bollinger.`;
     } else {
       const tp = Math.max(lastClose*1.02, bb.upper);
@@ -233,7 +231,7 @@ function calculateTakeProfitAll(levels, bb, lastClose, direction) {
   } else {
     const wsparc = levels.support.filter(s=>s<lastClose).sort((a,b)=>b-a);
     if (wsparc.length) {
-      const tp = Math.max(wsparc, bb.lower);
+      const tp = Math.max(wsparc[0], bb.lower);
       tpMsg = `🎯 TP: ${tp.toFixed(4)} (${((tp/lastClose-1)*100).toFixed(2)}%), najbliższe wsparcie/BB lower.`;
     } else {
       const tp = Math.min(lastClose*0.98, bb.lower);
@@ -242,9 +240,8 @@ function calculateTakeProfitAll(levels, bb, lastClose, direction) {
   }
   return { tpMsg };
 }
-// --- OCENA TRENDÓW
 function trendSummary(closes, sma20, sma50, ema20, macd, bb) {
-  const last = closes.at(-1), prev = closes.at(-2);
+  const last = closes.at(-1);
   let t = [];
   if (last > sma20 && sma20 > sma50) t.push("silny wzrostowy");
   else if (last < sma20 && sma20 < sma50) t.push("silny spadkowy");
@@ -295,20 +292,22 @@ async function scanRSISignals(exchange, intervalLabel, thresholds) {
           sym === sym.toUpperCase()
         );
     }
-    // Szybszy test: ogranicz na chwilę do top 30
-    // symbols = symbols.slice(0, 30);
+    symbols = symbols.slice(0, MAX_SYMBOLS);
     for (const batch of chunkArray(symbols, 10)) {
-      const batchResults = await Promise.all(batch.map(async sym => {
-        try {
-          const {closes} = await downloadCandles(exchange, sym, intervalLabel, 30);
-          if (!closes || closes.length < 15) return null;
-          const rsi = calculateRSI(closes);
-          if (rsi == null) return null;
-          if (rsi < thresholds.oversold) return { symbol: sym, rsi, type: "🟢 Wyprzedane:" };
-          if (rsi > thresholds.overbought) return { symbol: sym, rsi, type: "🔴 Wykupione:" };
-        } catch(e) { return null; }
-        return null;
-      }));
+      const batchResults = await Promise.race([
+        Promise.all(batch.map(async sym => {
+          try {
+            const { closes } = await downloadCandles(exchange, sym, intervalLabel, 30);
+            if (!closes || closes.length < 15) return null;
+            const rsi = calculateRSI(closes);
+            if (rsi == null) return null;
+            if (rsi < thresholds.oversold) return { symbol: sym, rsi, type: "🟢 Wyprzedane:" };
+            if (rsi > thresholds.overbought) return { symbol: sym, rsi, type: "🔴 Wykupione:" };
+          } catch(e) { return null; }
+          return null;
+        })),
+        new Promise(res => setTimeout(() => res(Array(batch.length).fill(null)), 9000))
+      ]);
       results = results.concat(batchResults.filter(x=>x));
       await new Promise(r=>setTimeout(r, 140));
     }
@@ -327,10 +326,10 @@ async function downloadCandles(exchange, symbol, intervalLabel, limit=50) {
       if (!resp.data.result || !resp.data.result.list || resp.data.result.list.length < 10) return {};
       const parsed = resp.data.result.list.map(arr=>({
         open:parseFloat(arr[1]),
-        high:parseFloat(arr),
-        low:parseFloat(arr),
-        close:parseFloat(arr),
-        volume:parseFloat(arr)
+        high:parseFloat(arr[2]),
+        low:parseFloat(arr[3]),
+        close:parseFloat(arr[4]),
+        volume:parseFloat(arr[5])
       }));
       return {
         closes: parsed.map(x=>x.close),
@@ -343,20 +342,20 @@ async function downloadCandles(exchange, symbol, intervalLabel, limit=50) {
       const resp = await axios.get(url);
       if (!Array.isArray(resp.data) || resp.data.length < 10) return {};
       return {
-        closes: resp.data.map(x=>parseFloat(x)),
-        highs: resp.data.map(x=>parseFloat(x)),
-        lows: resp.data.map(x=>parseFloat(x)),
-        volumes: resp.data.map(x=>parseFloat(x))
+        closes: resp.data.map(x=>parseFloat(x[4])),
+        highs: resp.data.map(x=>parseFloat(x[2])),
+        lows: resp.data.map(x=>parseFloat(x[3])),
+        volumes: resp.data.map(x=>parseFloat(x[5]))
       };
     } else if (exchange === 'mexc') {
       const url = `https://contract.mexc.com/api/v1/contract/kline/${symbol}?interval=${mexcIntervalMap[intervalLabel]}&limit=${limit}`;
       const resp = await axios.get(url);
       if (Array.isArray(resp.data.data) && resp.data.data.length >= 10) {
         return {
-          closes: resp.data.data.map(x=>parseFloat(x)),
-          highs: resp.data.data.map(x=>parseFloat(x)),
-          lows: resp.data.data.map(x=>parseFloat(x)),
-          volumes: resp.data.data.map(x=>parseFloat(x))
+          closes: resp.data.data.map(x=>parseFloat(x[4])),
+          highs: resp.data.data.map(x=>parseFloat(x[2])),
+          lows: resp.data.data.map(x=>parseFloat(x[3])),
+          volumes: resp.data.data.map(x=>parseFloat(x[5]))
         };
       } else if (resp.data.data && Array.isArray(resp.data.data.close) && resp.data.data.close.length >= 10) {
         return { closes: resp.data.data.close.slice(-10).map(Number), highs:[], lows:[], volumes:[] };
